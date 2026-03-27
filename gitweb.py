@@ -244,6 +244,7 @@ def git_header_html(status="200 OK"):
     print('<option value="grep">grep</option>')
     print('<option value="author">author</option>')
     print('<option value="committer">committer</option>')
+    print('<option value="pickaxe">pickaxe</option>')
     print('</select>')
     print('<input type="text" name="s" placeholder="search..." />')
     print('</form>')
@@ -1263,16 +1264,24 @@ def git_search():
 
   if not searchtext:
     print('<p>No search text specified.</p>')
-  elif searchtype in ['commit', 'author', 'committer']:
+  elif searchtype in ['commit', 'author', 'committer', 'pickaxe']:
     if searchtype == 'commit':
       log_raw = run_git(
           "rev-list", f"--grep={searchtext}", "--max-count=100", hash_id)
     elif searchtype == 'author':
       log_raw = run_git(
           "rev-list", f"--author={searchtext}", "--max-count=100", hash_id)
-    else:
+    elif searchtype == 'committer':
       log_raw = run_git(
           "rev-list", f"--committer={searchtext}", "--max-count=100", hash_id)
+    else:  # pickaxe
+      use_regexp = params.get('sr', ['0'])[0]
+      if use_regexp == '1':
+        log_raw = run_git("log", "--format=%H",
+                          f"-G{searchtext}", "--max-count=100", hash_id)
+      else:
+        log_raw = run_git("log", "--format=%H",
+                          f"-S{searchtext}", "--max-count=100", hash_id)
 
     if "Error running git" not in log_raw and log_raw.strip():
       print('<table class="shortlog">')

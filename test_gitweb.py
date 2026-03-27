@@ -192,6 +192,18 @@ class TestGitweb(unittest.TestCase):
     self.assertResponseOK(out)
     self.assertIn("Summary for testrepo.git", out)
 
+    # Test object dispatcher via PATH_INFO
+    out, code = self.run_cgi(path_info=f"/{self.repo_name}/object/HEAD")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("<h1>Commit", out)
+
+    # Test shortlog alias via PATH_INFO
+    out, code = self.run_cgi(path_info=f"/{self.repo_name}/shortlog")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Update main.py script to use f-strings", out)
+
   def test_rss_feed(self):
     out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=rss")
     self.assertEqual(code, 0)
@@ -227,6 +239,60 @@ class TestGitweb(unittest.TestCase):
     self.assertEqual(code, 0)
     self.assertResponseOK(out)
     self.assertIn("<h1>Blob", out)
+
+  def test_search_commit(self):
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&h=HEAD&st=commit&s=Initial")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Initial commit: Add README.md", out)
+    self.assertNotIn("Update main.py", out)
+
+  def test_search_pickaxe(self):
+    # We search for "Hello" which was added in the second commit.
+    # Note: -S only matches if the number of occurrences changes.
+    # Since commit 3 changes "Hello, world!" to "f'Hello, {name}!'",
+    # the count of "Hello" stays the same, so commit 3 is NOT returned by -S.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&h=HEAD&st=pickaxe&s=Hello")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Add main.py script", out)
+    self.assertNotIn("Update main.py script to use f-strings", out)
+    self.assertNotIn("Initial commit", out)
+
+  def test_search_pickaxe_regex(self):
+    # We search for regex "Hello, .*"
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&h=HEAD&st=pickaxe&sr=1&s=Hello,%20.*")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Add main.py script", out)
+
+  def test_invalid_action(self):
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=does_not_exist")
+    self.assertEqual(code, 0)
+    self.assertIn("Status: 404 Not Found", out)
+    self.assertIn("Unknown action", out)
+
+  def test_invalid_project(self):
+    # If the project doesn't exist, we fallback to project list if not provided, or might fail.
+    # Let's test providing a non-existent project and viewing its summary.
+    # Actually gitweb.py sets git_dir = path if .git doesn't exist, then run_git will return "Error running git..."
+    # So we just ensure it doesn't crash in a weird way
+    out, code = self.run_cgi(query_string=f"p=nonexistent.git&a=summary")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Summary for nonexistent.git", out)
+
+  def test_invalid_hash_object(self):
+    # Trying to view an object that doesn't exist
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=object&h=badc0ffee")
+    self.assertEqual(code, 0)
+    self.assertIn("Status: 404 Not Found", out)
+    self.assertIn("Object badc0ffee not found", out)
 
 
 if __name__ == "__main__":

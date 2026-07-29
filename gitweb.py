@@ -102,15 +102,10 @@ def esc_path_info(s):
 
 def _parse_tz_offset(tz):
   """Parse a git timezone string like '+0000' or '-0730' into a timedelta."""
-  if not tz or len(tz) < 5:
-    return timedelta()
-  sign = -1 if tz[0] == '-' else 1
   try:
-    hours = int(tz[1:3])
-    minutes = int(tz[3:5])
-  except ValueError:
+    return datetime.strptime(tz, '%z').utcoffset()
+  except (ValueError, TypeError):
     return timedelta()
-  return sign * timedelta(hours=hours, minutes=minutes)
 
 
 def commit_datetime(co, who='committer'):
@@ -405,13 +400,13 @@ def parse_tag(tag_id):
       idx += 1
       break
     if line.startswith('object '):
-      tag_info['object'] = line[7:]
+      tag_info['object'] = line.removeprefix('object ')
     elif line.startswith('type '):
-      tag_info['type'] = line[5:]
+      tag_info['type'] = line.removeprefix('type ')
     elif line.startswith('tag '):
-      tag_info['tag'] = line[4:]
+      tag_info['tag'] = line.removeprefix('tag ')
     elif line.startswith('tagger '):
-      tag_info['tagger'] = line[7:]
+      tag_info['tagger'] = line.removeprefix('tagger ')
     idx += 1
 
   tag_info['comment'] = lines[idx:]
@@ -443,9 +438,9 @@ def parse_commit(commit_id):
   while i < len(lines) and lines[i]:
     line = lines[i]
     if line.startswith("tree "):
-      co['tree'] = line[5:]
+      co['tree'] = line.removeprefix('tree ')
     elif line.startswith("parent "):
-      co['parents'].append(line[7:])
+      co['parents'].append(line.removeprefix('parent '))
     elif line.startswith("author "):
       match = re.match(r"author (.*) ([0-9]+) (.*)", line)
       if match:

@@ -7,7 +7,7 @@ import re
 import subprocess
 import urllib.parse
 import html
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # Enable basic error reporting
 
@@ -100,6 +100,29 @@ def esc_path_info(s):
   return urllib.parse.quote(to_utf8(s), safe='/')
 
 
+def _parse_tz_offset(tz):
+  """Parse a git timezone string like '+0000' or '-0730' into a timedelta."""
+  if not tz or len(tz) < 5:
+    return timedelta()
+  sign = -1 if tz[0] == '-' else 1
+  try:
+    hours = int(tz[1:3])
+    minutes = int(tz[3:5])
+  except ValueError:
+    return timedelta()
+  return sign * timedelta(hours=hours, minutes=minutes)
+
+
+def commit_datetime(co, who='committer'):
+  """Return the author/committer date as a tz-aware datetime in the
+  commit's own timezone (not the server's local time)."""
+  epoch = co.get(f'{who}_epoch')
+  if epoch is None:
+    return datetime.fromtimestamp(0, tz=timezone.utc)
+  offset = _parse_tz_offset(co.get(f'{who}_tz', '+0000'))
+  return datetime.fromtimestamp(epoch, tz=timezone(offset))
+
+
 def href(**kwargs):
   global my_url, my_uri, project, params
 
@@ -123,7 +146,6 @@ def href(**kwargs):
   if USE_PATHINFO and 'project' in p and p['project'] is not None:
     url += f"/{esc_url(p['project'])}"
     if 'action' in p and p['action'] is not None:
-      # We skip adding action if it's the default (e.g., summary)
       url += f"/{esc_url(p['action'])}"
 
       if 'hash_base' in p and p['hash_base'] is not None and 'file_name' in p and p['file_name'] is not None:
@@ -438,12 +460,14 @@ def parse_commit(commit_id):
         co['committer_tz'] = match.group(3)
     i += 1
 
-  # Commit message
+  # Commit message. rev-list --header indents every message line by
+  # exactly four spaces (blank lines become four spaces); strip only
+  # that prefix so intentional indentation in the message is preserved.
   co['comment'] = []
   i += 1  # Skip empty line
   while i < len(lines):
-    line = lines[i].lstrip()
-    co['comment'].append(line)
+    line = lines[i]
+    co['comment'].append(line.removeprefix('    '))
     i += 1
 
   if co['comment']:
@@ -477,31 +501,43 @@ def parse_tree(tree_id):
 # --- Actions ---
 
 
+def _repo_git_dir(path):
+  """Return the .git dir if *path* is a git repository, else None.
+
+  Recognizes both bare repos (objects/ at top level) and working repos
+  (.git/objects)."""
+  if os.path.exists(os.path.join(path, "objects")):
+    return path
+  if os.path.exists(os.path.join(path, ".git", "objects")):
+    return os.path.join(path, ".git")
+  return None
+
+
 def get_projects():
   projects = []
-  if os.path.exists(PROJECT_ROOT):
-    for entry in sorted(os.listdir(PROJECT_ROOT)):
-      path = os.path.join(PROJECT_ROOT, entry)
-      if os.path.isdir(path):
-        # Simple check for git repo
-        is_git = False
-        proj_git_dir = None
-        if os.path.exists(os.path.join(path, "objects")):
-          is_git = True
-          proj_git_dir = path
-        elif os.path.exists(os.path.join(path, ".git", "objects")):
-          is_git = True
-          proj_git_dir = os.path.join(path, ".git")
+  if not os.path.isdir(PROJECT_ROOT):
+    return projects
 
-        if is_git:
-          desc = get_project_description(proj_git_dir)
-          owner = get_project_owner(proj_git_dir)
-          projects.append({
-              'path': entry,
-              'git_dir': proj_git_dir,
-              'description': desc,
-              'owner': owner
-          })
+  # Walk PROJECT_ROOT looking for git repositories, descending into
+  # non-repo directories so nested projects (e.g. group/sub.git) are
+  # listed too. A directory that is itself a repo is recorded and not
+  # descended into.
+  for dirpath, dirnames, _ in os.walk(PROJECT_ROOT):
+    # Skip dot-directories (e.g. .git) and don't descend into them.
+    dirnames[:] = sorted(d for d in dirnames if not d.startswith('.'))
+    proj_git_dir = _repo_git_dir(dirpath)
+    if proj_git_dir:
+      rel = os.path.relpath(dirpath, PROJECT_ROOT)
+      desc = get_project_description(proj_git_dir)
+      owner = get_project_owner(proj_git_dir)
+      projects.append({
+          'path': rel,
+          'git_dir': proj_git_dir,
+          'description': desc,
+          'owner': owner
+      })
+      dirnames[:] = []  # don't descend into a repository
+  projects.sort(key=lambda p: p['path'])
   return projects
 
 
@@ -576,7 +612,7 @@ def git_summary():
       co = parse_commit(commit_id)
       if co:
         url = href(project=project, action="commit", hash=commit_id)
-        dt = datetime.fromtimestamp(co["committer_epoch"]).strftime("%Y-%m-%d")
+        dt = commit_datetime(co).strftime("%Y-%m-%d")
         print(
             f'<tr><td>{dt}</td><td><a href="{esc_url(url)}" class="list">{esc_html(co.get("author", ""))}</a></td>')
         print(
@@ -615,7 +651,7 @@ def _print_refs_table(refs, ref_type):
     if not co:
       continue
 
-    dt = datetime.fromtimestamp(co["committer_epoch"]).strftime("%Y-%m-%d")
+    dt = commit_datetime(co).strftime("%Y-%m-%d")
     name = ref['name']
 
     log_url = href(project=project, action="log", hash=name)
@@ -776,7 +812,7 @@ def git_log():
       co = parse_commit(commit_id)
       if co:
         url = href(project=project, action="commit", hash=commit_id)
-        dt = datetime.fromtimestamp(co["committer_epoch"]).strftime("%Y-%m-%d")
+        dt = commit_datetime(co).strftime("%Y-%m-%d")
         print(f'<tr><td>{dt}</td><td>{esc_html(co.get("author", ""))}</td>')
         print(
             f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a></td>')
@@ -1102,19 +1138,21 @@ def git_commitdiff(format='html', single=False):
         hash_parent = "--root"
 
   if format == 'patch':
-    commit_spec = []
-    if hash_parent:
-      commit_spec.extend(["-n", f"{hash_parent}..{hash_id}"])
+    if single:
+      # A single commit's patch: always exactly one, against its parent
+      # (--root is a no-op for non-root commits). An explicit hp is not
+      # honored here because format-patch has no way to select a parent
+      # for a single commit.
+      commit_spec = ["-1", "--root", hash_id]
+    else:
+      commit_spec = []
+      if hash_parent:
+        commit_spec.extend(["-n", f"{hash_parent}..{hash_id}"])
+      else:
+        commit_spec.append("-n")
+        commit_spec.extend(["--root", hash_id])
       if PATCHES_LIMIT > 0:
         commit_spec.insert(0, f"-{PATCHES_LIMIT}")
-    else:
-      if single:
-        commit_spec.append("-1")
-      else:
-        if PATCHES_LIMIT > 0:
-          commit_spec.append(f"-{PATCHES_LIMIT}")
-        commit_spec.append("-n")
-      commit_spec.extend(["--root", hash_id])
 
     filename = f"{os.path.basename(project)}-{hash_id[:7]}.patch"
     print("Status: 200 OK")
@@ -1131,6 +1169,11 @@ def git_commitdiff(format='html', single=False):
 
   if format == 'plain':
     cmd = ["diff-tree", "-r", "-p", "--full-index"]
+    # Enable rename detection when comparing an old path to a new one
+    # (blobdiff with file_parent), so the result is a single rename diff
+    # rather than a separate delete+add.
+    if file_parent and file_parent != file_name:
+      cmd.append("-M")
     if hash_parent:
       if hash_parent == "--root":
         cmd.extend(["--root", hash_id])
@@ -1189,6 +1232,8 @@ def git_commitdiff(format='html', single=False):
   print('</div>')
 
   cmd = ["diff-tree", "-r", "-p", "--full-index", "--no-commit-id"]
+  if file_parent and file_parent != file_name:
+    cmd.append("-M")
   if hash_parent:
     if hash_parent == "--root":
       cmd.extend(["--root", hash_id])
@@ -1323,8 +1368,7 @@ def git_search():
         co = parse_commit(commit_id)
         if co:
           url = href(project=project, action="commit", hash=commit_id)
-          dt = datetime.fromtimestamp(
-              co["committer_epoch"]).strftime("%Y-%m-%d")
+          dt = commit_datetime(co).strftime("%Y-%m-%d")
           print(f'<tr><td>{dt}</td><td>{esc_html(co.get("author", ""))}</td>')
           print(
               f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a></td></tr>')
@@ -1386,7 +1430,7 @@ def _generate_feed(feed_type):
     return
 
   title = f"{SITE_NAME} - {project}"
-  link = f"{my_url}?p={project}&a=summary"
+  link = f"{my_url}?p={esc_param(project)}&a=summary"
   desc = f"Recent changes in {project}"
 
   if feed_type == 'rss':
@@ -1399,9 +1443,9 @@ def _generate_feed(feed_type):
     print('<language>en</language>')
 
     for co in commits:
-      commit_link = f"{my_url}?p={project}&a=commit&h={co['id']}"
-      dt = datetime.fromtimestamp(co["committer_epoch"]).strftime(
-          "%a, %d %b %Y %H:%M:%S %z")
+      commit_link = f"{my_url}?p={esc_param(project)}&a=commit&h={co['id']}"
+      # RFC 822 date in the commit's own timezone.
+      dt = commit_datetime(co).strftime("%a, %d %b %Y %H:%M:%S %z")
       print('<item>')
       print(f'<title>{esc_html(co["title"])}</title>')
       print(f'<link>{esc_html(commit_link)}</link>')
@@ -1420,12 +1464,13 @@ def _generate_feed(feed_type):
     print(f'<link rel="alternate" type="text/html" href="{esc_html(link)}" />')
     print(f'<id>{esc_html(link)}</id>')
     print(
-        f'<updated>{datetime.fromtimestamp(commits[0]["committer_epoch"]).strftime("%Y-%m-%dT%H:%M:%SZ")}</updated>')
+        f'<updated>{commit_datetime(commits[0]).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}</updated>')
 
     for co in commits:
-      commit_link = f"{my_url}?p={project}&a=commit&h={co['id']}"
-      dt = datetime.fromtimestamp(
-          co["committer_epoch"]).strftime("%Y-%m-%dT%H:%M:%SZ")
+      commit_link = f"{my_url}?p={esc_param(project)}&a=commit&h={co['id']}"
+      # Atom requires UTC; convert from the commit's timezone.
+      dt = commit_datetime(co).astimezone(
+          timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
       print('<entry>')
       print(f'<title>{esc_html(co["title"])}</title>')
       print(
@@ -1456,7 +1501,7 @@ def git_object():
       os.path.join(path, ".git")) else path
 
   if not hash_id:
-    hash_id = params.get('hb', ['HEAD'])[0]
+    hash_id = 'HEAD'
 
   out = run_git("cat-file", "-t", hash_id)
   out = out.strip() if out else ""

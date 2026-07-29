@@ -63,13 +63,16 @@ class TestGitweb(unittest.TestCase):
   def tearDownClass(cls):
     cls.temp_dir.cleanup()
 
-  def run_cgi(self, query_string="", path_info="", text=True, project_root=None):
+  def run_cgi(self, query_string="", path_info="", text=True,
+              project_root=None, extra_env=None):
     """Run gitweb.py as a CGI script and return the output."""
     env = os.environ.copy()
     env["GITWEB_PROJECTROOT"] = project_root or self.project_root
     env["SCRIPT_NAME"] = "gitweb.py"
     env["QUERY_STRING"] = query_string
     env["PATH_INFO"] = path_info
+    if extra_env:
+      env.update(extra_env)
 
     result = subprocess.run(
         [sys.executable, str(GITWEB_SCRIPT)],
@@ -443,6 +446,116 @@ class TestGitweb(unittest.TestCase):
       # No swallowed decode-error text should leak into the page.
       self.assertNotIn("codec", out)
       self.assertNotIn("can&#x27;t decode", out)
+
+  # --- Minor / fidelity fixes ---
+
+  def test_commit_date_uses_commit_timezone(self):
+    # 03:30+0500 == 2019-12-31 22:30 UTC. The commit-local date is
+    # 2020-01-01; rendering in the server's TZ (forced to UTC here)
+    # would show 2019-12-31.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "tz.git")
+      (repo / "f.txt").write_text("x\n")
+      subprocess.run(["git", "add", "f.txt"], cwd=repo,
+                     check=True, capture_output=True)
+      env = os.environ.copy()
+      env["GIT_AUTHOR_DATE"] = "2020-01-01T03:30:00+0500"
+      env["GIT_COMMITTER_DATE"] = "2020-01-01T03:30:00+0500"
+      subprocess.run(["git", "commit", "-m", "tz commit"], cwd=repo,
+                     check=True, capture_output=True, env=env)
+
+      out, code = self.run_cgi(query_string="p=tz.git&a=log",
+                               project_root=str(root),
+                               extra_env={"TZ": "UTC"})
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("2020-01-01", out)
+      self.assertNotIn("2019-12-31", out)
+
+  def test_commit_message_indentation_preserved(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "indent.git")
+      subprocess.run(["git", "commit", "--allow-empty",
+                      "-m", "summary", "-m", "    indented code line"],
+                     cwd=repo, check=True, capture_output=True)
+
+      out, code = self.run_cgi(query_string="p=indent.git&a=commit&h=HEAD",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # The four-space indent must survive (lstrip used to drop it).
+      self.assertIn("    indented code line", out)
+
+  def test_nested_project_listed(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      # A nested repo: <root>/group/nested.git
+      self._make_repo(root / "group" / "nested.git")
+      out, code = self.run_cgi(project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("group/nested.git", out)
+
+  def test_blobdiff_rename_detection(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "ren.git")
+      (repo / "old.txt").write_text("content\n")
+      run_git("add", "old.txt")
+      run_git("commit", "-m", "add old")
+      run_git("mv", "old.txt", "new.txt")
+      run_git("commit", "-m", "rename to new")
+      parent = subprocess.run(["git", "rev-parse", "HEAD^"],
+                              cwd=repo, capture_output=True,
+                              text=True).stdout.strip()
+      head = subprocess.run(["git", "rev-parse", "HEAD"],
+                            cwd=repo, capture_output=True,
+                            text=True).stdout.strip()
+
+      out, code = self.run_cgi(
+          query_string=f"p=ren.git&a=blobdiff&hpb={parent}&hb={head}"
+                       f"&fp=old.txt&f=new.txt",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # With -M the diff is a single rename, not a delete + add.
+      self.assertIn("rename from old.txt", out)
+      self.assertIn("rename to new.txt", out)
+
+  def test_rss_link_escapes_project_name(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      # A project whose name contains a space.
+      self._make_repo(root / "my repo.git")
+      (root / "my repo.git" / "f.txt").write_text("x\n")
+      subprocess.run(["git", "add", "f.txt"],
+                     cwd=root / "my repo.git", check=True, capture_output=True)
+      subprocess.run(["git", "commit", "-m", "c"],
+                     cwd=root / "my repo.git", check=True, capture_output=True)
+
+      out, code = self.run_cgi(
+          query_string="p=my%20repo.git&a=rss",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # The project must be percent-encoded in the feed link.
+      self.assertIn("p=my%20repo.git", out)
+      self.assertNotIn("p=my repo.git", out)
+
+  def test_patch_single_with_parent_is_single(self):
+    # a=patch with an explicit hp must still yield exactly one patch,
+    # not a numbered range.
+    parent = subprocess.run(["git", "rev-parse", "HEAD^"],
+                            cwd=self.repo_path, capture_output=True,
+                            text=True).stdout.strip()
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=patch&h=HEAD&hp={parent}")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Subject: [PATCH]", out)
+    self.assertNotIn("[PATCH 1/", out)
 
 
 if __name__ == "__main__":

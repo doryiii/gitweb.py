@@ -155,6 +155,20 @@ def git_cmd():
   return cmd
 
 
+def is_valid_project(name):
+  """Reject project names that could escape PROJECT_ROOT.
+
+  Gitweb receives the project path from the request (query string or
+  PATH_INFO); without validation a value like '../private' would point
+  --git-dir at a repository outside the project root."""
+  if not name or '\0' in name or os.path.isabs(name):
+    return False
+  parts = name.split('/')
+  if '..' in parts:
+    return False
+  return True
+
+
 def run_git(*args):
   full_cmd = git_cmd() + list(args)
   try:
@@ -382,22 +396,28 @@ def parse_commit(commit_id):
   if not raw or "Error running git" in raw:
     return None
 
-  lines = raw.strip().split("\n")
+  # rev-list --header terminates each commit with a NUL byte. Commit
+  # objects cannot contain NUL, so it is safe to strip it entirely;
+  # otherwise it would leak into co['comment'] (and thus into feeds as
+  # an illegal XML character).
+  lines = raw.replace("\0", "").strip().split("\n")
   if not lines:
     return None
 
   co = {}
-  # First line is hash + parents
+  # First line is the commit hash (parents come on 'parent ' lines).
   header = lines[0]
   parts = header.split()
   co['id'] = parts[0]
-  co['parents'] = parts[1:]
+  co['parents'] = []
 
   i = 1
   while i < len(lines) and lines[i]:
     line = lines[i]
     if line.startswith("tree "):
       co['tree'] = line[5:]
+    elif line.startswith("parent "):
+      co['parents'].append(line[7:])
     elif line.startswith("author "):
       match = re.match(r"author (.*) ([0-9]+) (.*)", line)
       if match:
@@ -1298,7 +1318,9 @@ def git_search():
     else:
       print('<p>No commits found.</p>')
   elif searchtype == 'grep':
-    grep_raw = run_git("grep", "-n", searchtext, hash_id)
+    # '-e' marks the pattern as a regex even if it begins with '-',
+    # preventing the user's search text from being parsed as a git flag.
+    grep_raw = run_git("grep", "-n", "-e", searchtext, hash_id)
     if "Error running git" not in grep_raw and grep_raw.strip():
       print('<table class="grep_results">')
       for line in grep_raw.strip().split("\n"):
@@ -1603,6 +1625,13 @@ def run_request():
   my_uri = my_url
 
   evaluate_path_info()
+
+  if project and not is_valid_project(project):
+    print("Status: 404 Not Found")
+    print("Content-Type: text/plain")
+    print()
+    print(f"Invalid project: {project}")
+    return
 
   if not action:
     if project:

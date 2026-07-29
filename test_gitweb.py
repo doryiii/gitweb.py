@@ -63,10 +63,10 @@ class TestGitweb(unittest.TestCase):
   def tearDownClass(cls):
     cls.temp_dir.cleanup()
 
-  def run_cgi(self, query_string="", path_info="", text=True):
+  def run_cgi(self, query_string="", path_info="", text=True, project_root=None):
     """Run gitweb.py as a CGI script and return the output."""
     env = os.environ.copy()
-    env["GITWEB_PROJECTROOT"] = self.project_root
+    env["GITWEB_PROJECTROOT"] = project_root or self.project_root
     env["SCRIPT_NAME"] = "gitweb.py"
     env["QUERY_STRING"] = query_string
     env["PATH_INFO"] = path_info
@@ -78,6 +78,20 @@ class TestGitweb(unittest.TestCase):
         text=text
     )
     return result.stdout, result.returncode
+
+  @staticmethod
+  def _make_repo(path):
+    """Create a throwaway repo at *path* and return it for ad-hoc tests."""
+    path = Path(path)
+    path.mkdir(parents=True)
+
+    def run_git(*args):
+      subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+
+    run_git("init")
+    run_git("config", "user.name", "Test User")
+    run_git("config", "user.email", "test@example.com")
+    return path, run_git
 
   def assertResponseOK(self, output):
     if isinstance(output, bytes):
@@ -293,6 +307,91 @@ class TestGitweb(unittest.TestCase):
     self.assertEqual(code, 0)
     self.assertIn("Status: 404 Not Found", out)
     self.assertIn("Object badc0ffee not found", out)
+
+  # --- Regression tests for correctness fixes ---
+
+  def test_no_nul_in_commit_and_feeds(self):
+    # rev-list --header terminates commits with NUL; it must not leak
+    # into HTML or the XML feeds (NUL is illegal in XML 1.0).
+    for qs in [f"p={self.repo_name}&a=commit&h=HEAD",
+               f"p={self.repo_name}&a=rss",
+               f"p={self.repo_name}&a=atom"]:
+      out, _ = self.run_cgi(query_string=qs, text=False)
+      self.assertNotIn(b"\x00", out, f"NUL byte present in {qs} output")
+
+  def test_merge_commitdiff_shows_changes(self):
+    # A merge that resolves a conflict must show the resolution. With
+    # '--root' (used when parents aren't detected) git suppresses merge
+    # diffs entirely; '--cc' shows the combined diff.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "merge.git")
+      (repo / "f.txt").write_text("base\n")
+      run_git("add", "f.txt")
+      run_git("commit", "-m", "base")
+      default_branch = subprocess.run(
+          ["git", "symbolic-ref", "--short", "HEAD"],
+          cwd=repo, capture_output=True, text=True).stdout.strip()
+      run_git("checkout", "-b", "feat")
+      (repo / "f.txt").write_text("feat-change\n")
+      run_git("commit", "-am", "feat")
+      run_git("checkout", default_branch)
+      (repo / "f.txt").write_text("main-change\n")
+      run_git("commit", "-am", "master change")
+      # Merge, resolve the conflict, and commit.
+      subprocess.run(["git", "merge", "--no-ff", "feat"],
+                     cwd=repo, capture_output=True)
+      (repo / "f.txt").write_text("resolved-line\n")
+      run_git("add", "f.txt")
+      run_git("commit", "-m", "merge feat resolved")
+
+      out, code = self.run_cgi(
+          query_string="p=merge.git&a=commitdiff&h=HEAD",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # The conflict resolution must appear (empty under the old --root).
+      self.assertIn("resolved-line", out)
+      self.assertIn('class="add"', out)
+
+  def test_search_grep_leading_dash(self):
+    # A grep pattern beginning with '-' must be treated as a literal
+    # pattern, not parsed as a git flag.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "dash.git")
+      (repo / "nums.txt").write_text("value = -42\nother line\n")
+      run_git("add", "nums.txt")
+      run_git("commit", "-m", "add nums")
+
+      out, code = self.run_cgi(
+          query_string="p=dash.git&a=search&st=grep&s=-42",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("nums.txt", out)
+      self.assertIn("-42", out)
+
+  def test_path_traversal_rejected(self):
+    # A project name that escapes PROJECT_ROOT must be refused.
+    out, code = self.run_cgi(
+        query_string="p=../../etc&a=summary")
+    self.assertEqual(code, 0)
+    self.assertIn("Status: 404 Not Found", out)
+    self.assertIn("Invalid project", out)
+
+    # And via PATH_INFO routing: place a real repo *above* the project
+    # root so the router would otherwise resolve '..' to it.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp) / "projects"
+      root.mkdir()
+      subprocess.run(["git", "init"], cwd=tmp, check=True,
+                     capture_output=True)
+      out, code = self.run_cgi(path_info="/../summary",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertIn("Status: 404 Not Found", out)
+      self.assertIn("Invalid project", out)
 
 
 if __name__ == "__main__":

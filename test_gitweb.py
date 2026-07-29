@@ -393,6 +393,57 @@ class TestGitweb(unittest.TestCase):
       self.assertIn("Status: 404 Not Found", out)
       self.assertIn("Invalid project", out)
 
+  def test_error_sentinel_in_content_not_misclassified(self):
+    # Git output containing the old error sentinel string must not be
+    # treated as a failure. Previously parse_tree/parse_commit grepped
+    # stdout for 'Error running git' and returned empty/None.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "sentinel.git")
+      # A file whose name contains the old sentinel.
+      (repo / "Error running git.txt").write_text("hi\n")
+      # A commit whose message contains the old sentinel.
+      (repo / "f.txt").write_text("x\n")
+      run_git("add", "f.txt")
+      run_git("commit", "-m", "Fix Error running git handling")
+      run_git("add", "Error running git.txt")
+      run_git("commit", "-m", "add sentinel-named file")
+
+      # Tree view must list the sentinel-named file.
+      out, code = self.run_cgi(query_string="p=sentinel.git&a=tree",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("Error running git.txt", out)
+
+      # Log view must list the commit whose message has the sentinel.
+      out, code = self.run_cgi(query_string="p=sentinel.git&a=log",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("Fix Error running git handling", out)
+
+  def test_blob_view_handles_binary(self):
+    # A binary blob (containing NUL) must render in the HTML blob view,
+    # not crash into a UnicodeDecodeError-turned-generic-error. The old
+    # text-mode read swallowed the decode error and rendered the error
+    # message into the page instead of the blob.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "bin.git")
+      (repo / "blob.bin").write_bytes(b"\x00\x01\x02 BINARY \xff\xfe\n")
+      run_git("add", "blob.bin")
+      run_git("commit", "-m", "add binary")
+
+      out, code = self.run_cgi(query_string="p=bin.git&a=blob&f=blob.bin",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn('id="blob"', out)
+      # No swallowed decode-error text should leak into the page.
+      self.assertNotIn("codec", out)
+      self.assertNotIn("can&#x27;t decode", out)
+
 
 if __name__ == "__main__":
   unittest.main(verbosity=2)

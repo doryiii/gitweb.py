@@ -170,16 +170,22 @@ def is_valid_project(name):
 
 
 def run_git(*args):
+  """Run git, returning decoded stdout on success or None on failure.
+
+  Returning None (rather than an error string) lets callers distinguish
+  failure from legitimate output by truthiness/identity, instead of
+  grepping stdout for a sentinel substring that real output could
+  contain (e.g. a commit message or tree entry named 'Error running git')."""
   full_cmd = git_cmd() + list(args)
   try:
     process = subprocess.Popen(
         full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    stdout, stderr = process.communicate()
+    stdout, _ = process.communicate()
     if process.returncode != 0:
-      return f"Error running git: {stderr}"
+      return None
     return stdout
-  except Exception as e:
-    return f"Error: {str(e)}"
+  except Exception:
+    return None
 
 
 def run_git_bin(*args):
@@ -283,7 +289,7 @@ def get_project_owner(proj_git_dir):
   git_dir = proj_git_dir
 
   owner = run_git("config", "gitweb.owner")
-  if owner and "Error running git" not in owner:
+  if owner:
     git_dir = old_git_dir
     return owner.strip()
 
@@ -301,7 +307,7 @@ def get_project_description(proj_git_dir):
   git_dir = proj_git_dir
 
   desc = run_git("config", "gitweb.description")
-  if desc and "Error running git" not in desc:
+  if desc:
     git_dir = old_git_dir
     return desc.strip()
 
@@ -322,7 +328,7 @@ def get_project_cloneurls(proj_git_dir):
 
   urls = []
   url_config = run_git("config", "--get-all", "gitweb.url")
-  if url_config and "Error running git" not in url_config:
+  if url_config:
     urls.extend([u.strip() for u in url_config.split("\n") if u.strip()])
 
   git_dir = old_git_dir
@@ -345,7 +351,7 @@ def parse_refs(ref_space, max_count=None):
 
   raw = run_git(*cmd)
   refs = []
-  if "Error running git" in raw:
+  if raw is None:
     return refs
 
   for line in raw.strip().split('\n'):
@@ -364,7 +370,7 @@ def parse_refs(ref_space, max_count=None):
 
 def parse_tag(tag_id):
   raw = run_git("cat-file", "tag", tag_id)
-  if "Error running git" in raw:
+  if raw is None:
     return None
 
   lines = raw.strip().split('\n')
@@ -393,7 +399,7 @@ def parse_tag(tag_id):
 def parse_commit(commit_id):
   # Get raw commit data with git rev-list --header --max-count=1
   raw = run_git("rev-list", "--header", "--max-count=1", commit_id)
-  if not raw or "Error running git" in raw:
+  if not raw:
     return None
 
   # rev-list --header terminates each commit with a NUL byte. Commit
@@ -450,7 +456,7 @@ def parse_commit(commit_id):
 
 def parse_tree(tree_id):
   raw = run_git("ls-tree", "-z", tree_id)
-  if "Error running git" in raw:
+  if raw is None:
     return []
 
   entries = []
@@ -564,7 +570,7 @@ def git_summary():
   # Show last few commits as a teaser
   print('<h2>Recent commits</h2>')
   log_raw = run_git("rev-list", "--max-count=5", "HEAD")
-  if "Error running git" not in log_raw:
+  if log_raw:
     print('<table class="shortlog">')
     for commit_id in log_raw.strip().split("\n"):
       co = parse_commit(commit_id)
@@ -739,7 +745,7 @@ def git_log():
   log_raw = run_git(*cmd)
 
   commits = []
-  if "Error running git" not in log_raw:
+  if log_raw:
     commits = [c for c in log_raw.strip().split("\n") if c]
 
   has_next = len(commits) > page_size
@@ -854,7 +860,7 @@ def _resolve_blob_hash(hash_base, file_name):
   if not hash_base or not file_name:
     return None
   raw = run_git("ls-tree", hash_base, "--", file_name)
-  if "Error running git" in raw or not raw.strip():
+  if not raw or not raw.strip():
     return None
   parts = raw.split()
   if len(parts) >= 3:
@@ -892,7 +898,14 @@ def git_blob():
     git_footer_html()
     return
 
-  content = run_git("cat-file", "blob", hash_id)
+  # Read the blob as bytes so binary files don't raise UnicodeDecodeError
+  # (the text-mode run_git would swallow that into a generic error and
+  # render nothing). We decode with 'replace' only for display.
+  blob_data = run_git_bin("cat-file", "blob", hash_id)
+  if blob_data is None:
+    print("<p>Blob not found</p>")
+    git_footer_html()
+    return
 
   print('<div class="page_body">')
   highlighted = None
@@ -902,14 +915,14 @@ def git_blob():
              "--inline-css", f"--syntax-by-name={file_name}"]
       p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-      stdout, _ = p.communicate(input=content.encode('utf-8', 'replace'))
+      stdout, _ = p.communicate(input=blob_data)
       if p.returncode == 0:
         highlighted = stdout.decode('utf-8', 'replace')
     except Exception:
       pass
 
   if highlighted is None:
-    highlighted = esc_html(content)
+    highlighted = esc_html(blob_data)
 
   print('<table class="code" id="blob">')
   for i, line in enumerate(highlighted.splitlines(), start=1):
@@ -1139,7 +1152,8 @@ def git_commitdiff(format='html', single=False):
     print("Status: 200 OK")
     print("Content-Type: text/plain; charset=utf-8")
     print()
-    print(diff)
+    if diff:
+      print(diff)
     return
 
   # HTML format
@@ -1192,7 +1206,7 @@ def git_commitdiff(format='html', single=False):
       cmd.append(file_parent)
     cmd.append(file_name)
 
-  diff_raw = run_git(*cmd)
+  diff_raw = run_git(*cmd) or ""
 
   print('<div class="patchset">')
 
@@ -1246,7 +1260,7 @@ def git_blame():
 
   if file_name:
     blame_raw = run_git("blame", "-c", hash_base, "--", file_name)
-    if "Error running git" not in blame_raw:
+    if blame_raw is not None:
       print('<table class="blame">')
       for line in blame_raw.split('\n'):
         if not line:
@@ -1259,7 +1273,7 @@ def git_blame():
           print(f'<td class="content">{esc_html(parts[-1])}</td></tr>')
       print('</table>')
     else:
-      print(f'<p>Error running blame: {esc_html(blame_raw)}</p>')
+      print('<p>Error running blame.</p>')
   else:
     print('<p>No file specified for blame.</p>')
 
@@ -1303,7 +1317,7 @@ def git_search():
         log_raw = run_git("log", "--format=%H",
                           f"-S{searchtext}", "--max-count=100", hash_id)
 
-    if "Error running git" not in log_raw and log_raw.strip():
+    if log_raw and log_raw.strip():
       print('<table class="shortlog">')
       for commit_id in log_raw.strip().split("\n"):
         co = parse_commit(commit_id)
@@ -1321,7 +1335,7 @@ def git_search():
     # '-e' marks the pattern as a regex even if it begins with '-',
     # preventing the user's search text from being parsed as a git flag.
     grep_raw = run_git("grep", "-n", "-e", searchtext, hash_id)
-    if "Error running git" not in grep_raw and grep_raw.strip():
+    if grep_raw and grep_raw.strip():
       print('<table class="grep_results">')
       for line in grep_raw.strip().split("\n"):
         parts = line.split(":", 3)
@@ -1359,7 +1373,7 @@ def _generate_feed(feed_type):
   print()
 
   log_raw = run_git("rev-list", "--max-count=15", hash_id)
-  if "Error running git" in log_raw:
+  if not log_raw:
     return
 
   commits = []
@@ -1444,10 +1458,8 @@ def git_object():
   if not hash_id:
     hash_id = params.get('hb', ['HEAD'])[0]
 
-  try:
-    out = run_git("cat-file", "-t", hash_id).strip()
-  except Exception:
-    out = "error"
+  out = run_git("cat-file", "-t", hash_id)
+  out = out.strip() if out else ""
 
   if out == "commit":
     git_commit()

@@ -686,6 +686,26 @@ class TestGitweb(unittest.TestCase):
       self.assertEqual(code, 0)
       self.assertResponseOK(out)
 
+  def test_error_body_does_not_reflect_crlf(self):
+    # The 404 "Invalid project" body must not echo CR/LF from the input
+    # (which could splice extra lines into the response).
+    out, code = self.run_cgi(
+        query_string="p=x%0d%0aSet-Cookie:%20bad=1&a=summary", text=False)
+    self.assertEqual(code, 0)
+    self.assertIn(b"Status: 404 Not Found", out)
+    self.assertIn(b"Invalid project:", out)
+    # CR/LF stripped from the reflected value; it stays on one line.
+    self.assertNotIn(b"\r", out)
+    self.assertIn(b"Invalid project: xSet-Cookie: bad=1", out)
+
+    # Same for the "Unknown action" body.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=bad%0d%0aX:%20y", text=False)
+    self.assertEqual(code, 0)
+    self.assertIn(b"Status: 404 Not Found", out)
+    self.assertIn(b"Unknown action:", out)
+    self.assertNotIn(b"\r", out)
+
 
 if __name__ == "__main__":
   unittest.main(verbosity=2)

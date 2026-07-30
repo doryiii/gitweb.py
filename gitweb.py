@@ -573,9 +573,11 @@ def git_project_index():
   print('Content-Disposition: inline; filename="index.aux"')
   print()
   for pr in projects:
-    # Simple escaping for space as per gitweb.perl
-    path = pr['path'].replace(' ', '+')
-    owner = pr['owner'].replace(' ', '+')
+    # Simple escaping for space as per gitweb.perl. Strip CR/LF/NUL so a
+    # project path or owner containing them can't splice extra entries
+    # into this machine-readable index.
+    path = esc_header(pr['path']).replace(' ', '+')
+    owner = esc_header(pr['owner']).replace(' ', '+')
     print(f"{path} {owner}")
 
 
@@ -1241,13 +1243,6 @@ def git_commitdiff(format='html', single=False):
   # HTML format
   git_header_html()
 
-  co = parse_commit(hash_id)
-  if not co:
-    # might be a blob hash if action was blobdiff
-    # but parse_commit expects a commit
-    # if it's a blob, we might need its base commit to show authorship
-    pass
-
   title = f'Commit diff for {esc_html(hash_id)}'
   if file_name:
     title = f'Blob diff for {esc_html(file_name)}'
@@ -1567,7 +1562,7 @@ def git_object():
     print("Status: 404 Not Found")
     print("Content-Type: text/plain")
     print()
-    print(f"Object {hash_id} not found or unknown type: {out}")
+    print(f"Object {esc_header(hash_id)} not found or unknown type: {esc_header(out)}")
 
 
 def git_snapshot():
@@ -1740,7 +1735,9 @@ def run_request():
     print("Status: 404 Not Found")
     print("Content-Type: text/plain")
     print()
-    print(f"Invalid project: {project}")
+    # esc_header strips CR/LF/NUL so a crafted project name can't splice
+    # extra lines into this text/plain body.
+    print(f"Invalid project: {esc_header(project)}")
     return
 
   if not action:
@@ -1755,7 +1752,7 @@ def run_request():
     print("Status: 404 Not Found")
     print("Content-Type: text/plain")
     print()
-    print(f"Unknown action: {action}")
+    print(f"Unknown action: {esc_header(action)}")
 
 
 if __name__ == "__main__":

@@ -557,6 +557,135 @@ class TestGitweb(unittest.TestCase):
     self.assertIn("Subject: [PATCH]", out)
     self.assertNotIn("[PATCH 1/", out)
 
+  # --- Regression tests for the second round of correctness fixes ---
+
+  def test_header_injection_blocked_in_project(self):
+    # CR/LF in a project name must be rejected, not printed into a header.
+    out, code = self.run_cgi(
+        query_string="p=x%0d%0aSet-Cookie:%20bad=1&a=snapshot&h=HEAD",
+        text=False)
+    self.assertEqual(code, 0)
+    self.assertIn(b"Status: 404 Not Found", out)
+    self.assertIn(b"Invalid project", out)
+    # The injected header must not appear in the header block (it may be
+    # reflected in the text/plain body, which a browser will not parse).
+    headers = out.split(b"\n\n", 1)[0]
+    self.assertNotIn(b"Set-Cookie:", headers)
+
+  def test_header_injection_blocked_in_patch_hash(self):
+    # A valid project but CR/LF in h must not split the Content-Disposition
+    # header into an injected header line.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=patch&h=HEAD%0d%0aInjected:%20y",
+        text=False)
+    self.assertEqual(code, 0)
+    self.assertNotIn(b"Injected:", out)
+    # The filename must be on a single line (CR/LF stripped).
+    self.assertNotIn(b"filename=\".-HEAD\r\n", out)
+    self.assertNotIn(b"filename=\".-HEAD\n", out)
+
+  def test_grep_result_blob_link_resolves(self):
+    # grep results must link to a blob that actually resolves, not to
+    # cat-file blob <rev> (which yields "Blob not found").
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "gr.git")
+      (repo / "nums.txt").write_text("value = -42\n")
+      run_git("add", "nums.txt")
+      run_git("commit", "-m", "add nums")
+
+      out, code = self.run_cgi(
+          query_string="p=gr.git&a=search&st=grep&s=-42",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # New link form uses hash_base:file_name in the path, not h=<rev>?f=.
+      self.assertIn("blob/HEAD:nums.txt", out)
+
+      # Following that link must render the blob content.
+      out, code = self.run_cgi(
+          path_info="/gr.git/blob/HEAD:nums.txt",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertNotIn("Blob not found", out)
+      self.assertIn("value = -42", out)
+
+  def test_grep_handles_colon_in_filename(self):
+    # A file whose path contains a colon must not be mis-parsed.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "colon.git")
+      (repo / "we:rd.txt").write_text("needle here\n")
+      run_git("add", "we:rd.txt")
+      run_git("commit", "-m", "add colon file")
+
+      out, code = self.run_cgi(
+          query_string="p=colon.git&a=search&st=grep&s=needle",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("we:rd.txt", out)
+      # The colon in the path must not shift the parsed fields: the link
+      # keeps the full path and the line number renders after it.
+      self.assertIn("blob/HEAD:we:rd.txt", out)
+      self.assertIn("</a>:1", out)
+      self.assertIn("needle here", out)
+
+  def test_tree_with_commit_and_file_name(self):
+    # a=tree&h=<commit>&f=<dir> must list the subdir, not the root tree.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "t.git")
+      (repo / "top.txt").write_text("top\n")
+      (repo / "sub").mkdir()
+      (repo / "sub" / "deep.txt").write_text("deep\n")
+      run_git("add", ".")
+      run_git("commit", "-m", "add tree")
+
+      out, code = self.run_cgi(
+          query_string="p=t.git&a=tree&h=HEAD&f=sub",
+          project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      self.assertIn("deep.txt", out)
+      # The root entry must not leak through with a mis-prefixed path.
+      self.assertNotIn("sub/top.txt", out)
+
+  def test_plain_diff_has_no_stray_commit_id(self):
+    # commitdiff_plain must start the body with "diff --git", not a bare
+    # commit hash line (missing --no-commit-id used to emit one).
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=commitdiff_plain&h=HEAD")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    body = out.split("\n\n", 1)[1] if "\n\n" in out else out
+    self.assertTrue(body.lstrip().startswith("diff --git"),
+                    f"plain diff body should start with diff --git, got: {body[:60]!r}")
+
+  def test_commit_shows_parent_links(self):
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=commit&h=HEAD")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Parent:", out)
+    # The parent link should point at a commit view.
+    self.assertIn("/commit/", out)
+
+  def test_snapshot_pathspec_is_not_parsed_as_option(self):
+    # A leading-dash file_name must be passed as a pathspec, not a flag.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "sp.git")
+      (repo / "-dash.txt").write_text("x\n")
+      run_git("add", "--", "-dash.txt")
+      run_git("commit", "-m", "dash")
+      out, code = self.run_cgi(
+          query_string="p=sp.git&a=snapshot&h=HEAD&f=-dash.txt",
+          project_root=str(root), text=False)
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+
 
 if __name__ == "__main__":
   unittest.main(verbosity=2)

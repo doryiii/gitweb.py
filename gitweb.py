@@ -100,6 +100,15 @@ def esc_path_info(s):
   return urllib.parse.quote(to_utf8(s), safe='/')
 
 
+def esc_header(s):
+  """Sanitize a value for use in an HTTP header field.
+
+  CR/LF/NUL in a user-controlled param (project, hash, file name) would
+  otherwise let an attacker inject extra header lines (HTTP response
+  splitting) via Content-Disposition filenames."""
+  return to_utf8(s).replace("\r", "").replace("\n", "").replace("\0", "")
+
+
 def _parse_tz_offset(tz):
   """Parse a git timezone string like '+0000' or '-0730' into a timedelta."""
   try:
@@ -178,7 +187,7 @@ def is_valid_project(name):
   Gitweb receives the project path from the request (query string or
   PATH_INFO); without validation a value like '../private' would point
   --git-dir at a repository outside the project root."""
-  if not name or '\0' in name or os.path.isabs(name):
+  if not name or '\0' in name or '\r' in name or '\n' in name or os.path.isabs(name):
     return False
   parts = name.split('/')
   if '..' in parts:
@@ -196,7 +205,8 @@ def run_git(*args):
   full_cmd = git_cmd() + list(args)
   try:
     process = subprocess.Popen(
-        full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace")
     stdout, _ = process.communicate()
     if process.returncode != 0:
       return None
@@ -844,9 +854,17 @@ def git_tree():
     title += f' : {esc_html(file_name)}'
   print(f'<h1>{title}</h1>')
 
-  # If hash_id is a commit, get its tree
+  # Resolve the tree to list. hash_id may be a commit (use its tree, or
+  # the subtree at file_name), a tree hash (subtree navigation via the
+  # UI threads the subtree hash here), or fall back to hash_id itself.
   co = parse_commit(hash_id)
-  tree_id = co['tree'] if co and 'tree' in co else hash_id
+  if co and 'tree' in co:
+    if file_name:
+      tree_id = _resolve_tree_hash(hash_base, file_name) or co['tree']
+    else:
+      tree_id = co['tree']
+  else:
+    tree_id = hash_id
 
   entries = parse_tree(tree_id)
   print('<table class="tree">')
@@ -895,6 +913,23 @@ def _resolve_blob_hash(hash_base, file_name):
     return None
   parts = raw.split()
   if len(parts) >= 3:
+    return parts[2]
+  return None
+
+
+def _resolve_tree_hash(hash_base, file_name):
+  """Return the tree hash of *file_name* within *hash_base*, or None.
+
+  Used when git_tree is given a commit plus a path (h=<commit>&f=<dir>)
+  so the subtree -- not the root tree -- is listed."""
+  if not hash_base or not file_name:
+    return None
+  raw = run_git("ls-tree", hash_base, "--", file_name)
+  if not raw or not raw.strip():
+    return None
+  parts = raw.split()
+  # mode type hash name -- hash is always the third whitespace token
+  if len(parts) >= 3 and parts[1] == 'tree':
     return parts[2]
   return None
 
@@ -1005,7 +1040,7 @@ def git_blob_plain():
   print("Status: 200 OK")
   print(f"Content-Type: {mime_type}")
   if file_name:
-    print(f'Content-Disposition: inline; filename="{file_name}"')
+    print(f'Content-Disposition: inline; filename="{esc_header(file_name)}"')
   print()
   sys.stdout.flush()
   sys.stdout.buffer.write(blob_data)
@@ -1031,6 +1066,15 @@ def git_commit():
     print('<pre>')
     print(esc_html("\n".join(co["comment"])))
     print('</pre>')
+
+    # Parent links
+    parents = co.get('parents', [])
+    if parents:
+      links = []
+      for parent_id in parents:
+        p_url = href(project=project, action="commit", hash=parent_id)
+        links.append(f'<a href="{esc_url(p_url)}">{esc_html(parent_id)}</a>')
+      print(f'<p>Parent: {" | ".join(links)}</p>')
 
     # Link to tree
     tree_url = href(project=project, action="tree", hash=co['tree'])
@@ -1152,7 +1196,7 @@ def git_commitdiff(format='html', single=False):
     filename = f"{os.path.basename(project)}-{hash_id[:7]}.patch"
     print("Status: 200 OK")
     print("Content-Type: text/plain; charset=utf-8")
-    print(f'Content-Disposition: inline; filename="{filename}"')
+    print(f'Content-Disposition: inline; filename="{esc_header(filename)}"')
     print()
 
     raw = run_git_bin("format-patch", "--stdout", *commit_spec)
@@ -1163,7 +1207,7 @@ def git_commitdiff(format='html', single=False):
     return
 
   if format == 'plain':
-    cmd = ["diff-tree", "-r", "-p", "--full-index"]
+    cmd = ["diff-tree", "-r", "-p", "--full-index", "--no-commit-id"]
     # Enable rename detection when comparing an old path to a new one
     # (blobdiff with file_parent), so the result is a single rename diff
     # rather than a separate delete+add.
@@ -1373,21 +1417,31 @@ def git_search():
   elif searchtype == 'grep':
     # '-e' marks the pattern as a regex even if it begins with '-',
     # preventing the user's search text from being parsed as a git flag.
-    grep_raw = run_git("grep", "-n", "-e", searchtext, hash_id)
-    if grep_raw and grep_raw.strip():
+    # '-z' NUL-separates the path/line/match fields so file paths that
+    # contain colons parse correctly (the default ':' delimiter does not).
+    grep_raw = run_git("grep", "-n", "-z", "-e", searchtext, hash_id)
+    if grep_raw and grep_raw.strip("\n\0"):
       print('<table class="grep_results">')
-      for line in grep_raw.strip().split("\n"):
-        parts = line.split(":", 3)
-        if len(parts) >= 3:
-          f_name = parts[1]
-          f_line = parts[2]
-          text = parts[3] if len(parts) > 3 else ""
+      # Each record is "<rev>:<path>\0<line>\0<match>\n"; the rev prefix
+      # is exactly hash_id, so strip it rather than guessing where the
+      # path begins.
+      prefix = f"{hash_id}:"
+      for record in grep_raw.split("\n"):
+        if not record:
+          continue
+        fields = record.split("\0")
+        if len(fields) < 3:
+          continue
+        revpath, f_line, text = fields[0], fields[1], fields[2]
+        f_name = revpath[len(prefix):] if revpath.startswith(prefix) else revpath
 
-          url = href(project=project, action="blob",
-                     hash=parts[0], file_name=f_name)
-          print(
-              f'<tr><td><a href="{esc_url(url)}">{esc_html(f_name)}</a>:{esc_html(f_line)}</td>')
-          print(f'<td>{esc_html(text)}</td></tr>')
+        # Link via hash_base so git_blob resolves the blob from the rev
+        # (the grep output carries a rev, not a blob hash).
+        url = href(project=project, action="blob",
+                   hash_base=hash_id, file_name=f_name)
+        print(
+            f'<tr><td><a href="{esc_url(url)}">{esc_html(f_name)}</a>:{esc_html(f_line)}</td>')
+        print(f'<td>{esc_html(text)}</td></tr>')
       print('</table>')
     else:
       print('<p>No matches found.</p>')
@@ -1551,16 +1605,20 @@ def git_snapshot():
   if file_name:
     name += "-" + file_name.replace('/', '-')
 
+  # name flows into both the archive --prefix and the Content-Disposition
+  # filename; strip CR/LF/NUL so user-controlled hash/file values cannot
+  # inject headers (response splitting).
+  name = esc_header(name)
   filename = name + fmt['suffix']
 
   cmd = git_cmd() + ["archive",
                      f"--format={fmt['format']}", f"--prefix={name}/", hash_id]
   if file_name:
-    cmd.append(file_name)
+    cmd.extend(["--", file_name])
 
   print("Status: 200 OK")
   print(f"Content-Type: {fmt['mimetype']}")
-  print(f"Content-Disposition: inline; filename=\"{filename}\"")
+  print(f"Content-Disposition: inline; filename=\"{esc_header(filename)}\"")
   print()
   sys.stdout.flush()
 

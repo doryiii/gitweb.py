@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import subprocess
@@ -705,6 +706,39 @@ class TestGitweb(unittest.TestCase):
     self.assertIn(b"Status: 404 Not Found", out)
     self.assertIn(b"Unknown action:", out)
     self.assertNotIn(b"\r", out)
+
+  def test_tags_ordered_by_creatordate(self):
+    # Annotated tags have a tagger date, not a committer date, so they
+    # must be sorted by creatordate (as gitweb does).  An annotated tag
+    # newer than a lightweight tag must list first.
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "to.git")
+      (repo / "a").write_text("a\n")
+      run_git("add", "a")
+      env = os.environ.copy()
+      env["GIT_AUTHOR_DATE"] = "2020-01-01T10:00:00"
+      env["GIT_COMMITTER_DATE"] = "2020-01-01T10:00:00"
+      subprocess.run(["git", "commit", "-m", "old"], cwd=repo,
+                     check=True, capture_output=True, env=env)
+      run_git("tag", "v-light")           # lightweight -> commit (2020-01-01)
+
+      (repo / "b").write_text("b\n")
+      run_git("add", "b")
+      env["GIT_AUTHOR_DATE"] = "2020-01-02T10:00:00"
+      env["GIT_COMMITTER_DATE"] = "2020-01-02T10:00:00"
+      subprocess.run(["git", "commit", "-m", "new"], cwd=repo,
+                     check=True, capture_output=True, env=env)
+      # annotated tag -> tagger date 2020-01-02
+      subprocess.run(["git", "tag", "-a", "v-annot", "-m", "annot"],
+                     cwd=repo, check=True, capture_output=True, env=env)
+
+      out, code = self.run_cgi(query_string="p=to.git&a=tags",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      names = re.findall(r'class="list name"[^>]*>([^<]*)</a>', out)
+      self.assertEqual(names, ["v-annot", "v-light"])
 
   # --- Parity fixes against gitweb.perl ---
 

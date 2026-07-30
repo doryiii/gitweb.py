@@ -376,7 +376,14 @@ def get_project_cloneurls(proj_git_dir):
 
 
 def parse_refs(ref_space, max_count=None):
-  cmd = ["for-each-ref", "--sort=-committerdate"]
+  # Match gitweb's sort keys: tags by -creatordate (annotated tags have a
+  # tagger date, not a committer date, so -committerdate would leave them
+  # unordered); heads/remotes by -HEAD then -committerdate (current branch
+  # first).
+  if ref_space == "refs/tags":
+    cmd = ["for-each-ref", "--sort=-creatordate"]
+  else:
+    cmd = ["for-each-ref", "--sort=-HEAD", "--sort=-committerdate"]
   if max_count:
     cmd.append(f"--count={max_count}")
   cmd.extend(

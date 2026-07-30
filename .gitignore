@@ -1,2 +1,6 @@
 __pycache__
 .claude
+
+# parity harness: locally installed Perl CGI
+parity/perllocal/
+parity/.smoke

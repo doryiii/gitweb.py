@@ -286,6 +286,7 @@ def git_header_html(status="200 OK"):
     print(f'<form method="get" action="{esc_url(my_url)}">')
     print(f'<input type="hidden" name="p" value="{esc_html(project)}"/>')
     print('<input type="hidden" name="a" value="search"/>')
+    print('<input type="hidden" name="h" value="HEAD"/>')
     print('<select name="st">')
     print('<option value="commit">commit</option>')
     print('<option value="grep">grep</option>')
@@ -293,7 +294,12 @@ def git_header_html(status="200 OK"):
     print('<option value="committer">committer</option>')
     print('<option value="pickaxe">pickaxe</option>')
     print('</select>')
+    print(' search: ')
     print('<input type="text" name="s" placeholder="search..." />')
+    print('<span title="Extended regular expression">')
+    print('<input type="checkbox" name="sr" value="1" id="sr"/>')
+    print('<label for="sr">re</label>')
+    print('</span>')
     print('</form>')
     print('</div>')
 
@@ -423,6 +429,16 @@ def parse_tag(tag_id):
   return tag_info
 
 
+def _split_ident(ident):
+  """Split a "Name <email>" ident into (name, email), mirroring gitweb.
+
+  Falls back to (ident, "") when there is no angle-bracket address."""
+  m = re.match(r"([^<]+) <([^>]*)>", ident)
+  if m:
+    return m.group(1), m.group(2)
+  return ident, ""
+
+
 def parse_commit(commit_id):
   # Get raw commit data with git rev-list --header --max-count=1
   raw = run_git("rev-list", "--header", "--max-count=1", commit_id)
@@ -457,12 +473,15 @@ def parse_commit(commit_id):
         co['author'] = match.group(1)
         co['author_epoch'] = int(match.group(2))
         co['author_tz'] = match.group(3)
+        co['author_name'], co['author_email'] = _split_ident(co['author'])
     elif line.startswith("committer "):
       match = re.match(r"committer (.*) ([0-9]+) (.*)", line)
       if match:
         co['committer'] = match.group(1)
         co['committer_epoch'] = int(match.group(2))
         co['committer_tz'] = match.group(3)
+        co['committer_name'], co['committer_email'] = _split_ident(
+            co['committer'])
     i += 1
 
   # Commit message. rev-list --header indents every message line by
@@ -1378,23 +1397,25 @@ def git_search():
   if not searchtext:
     print('<p>No search text specified.</p>')
   elif searchtype in ['commit', 'author', 'committer', 'pickaxe']:
-    if searchtype == 'commit':
-      log_raw = run_git(
-          "rev-list", f"--grep={searchtext}", "--max-count=100", hash_id)
-    elif searchtype == 'author':
-      log_raw = run_git(
-          "rev-list", f"--author={searchtext}", "--max-count=100", hash_id)
-    elif searchtype == 'committer':
-      log_raw = run_git(
-          "rev-list", f"--committer={searchtext}", "--max-count=100", hash_id)
+    # search_use_regexp ('sr') is honored by every type, matching gitweb:
+    # commit/author/committer use --fixed-strings vs --extended-regexp
+    # (with --regexp-ignore-case always on); pickaxe uses -S with
+    # --pickaxe-regex.
+    use_regexp = params.get('sr', ['0'])[0] == '1'
+    if searchtype in ('commit', 'author', 'committer'):
+      flag = {'commit': '--grep', 'author': '--author',
+              'committer': '--committer'}[searchtype]
+      cmd = ["rev-list", f"{flag}={searchtext}", "--max-count=100",
+             "--regexp-ignore-case",
+             "--extended-regexp" if use_regexp else "--fixed-strings",
+             hash_id]
+      log_raw = run_git(*cmd)
     else:  # pickaxe
-      use_regexp = params.get('sr', ['0'])[0]
-      if use_regexp == '1':
-        log_raw = run_git("log", "--format=%H",
-                          f"-G{searchtext}", "--max-count=100", hash_id)
-      else:
-        log_raw = run_git("log", "--format=%H",
-                          f"-S{searchtext}", "--max-count=100", hash_id)
+      cmd = ["log", "--format=%H", f"-S{searchtext}", "--max-count=100"]
+      if use_regexp:
+        cmd.append("--pickaxe-regex")
+      cmd.append(hash_id)
+      log_raw = run_git(*cmd)
 
     if log_raw and log_raw.strip():
       print('<table class="shortlog">')
@@ -1410,11 +1431,18 @@ def git_search():
     else:
       print('<p>No commits found.</p>')
   elif searchtype == 'grep':
-    # '-e' marks the pattern as a regex even if it begins with '-',
+    # '-e' marks the pattern as a pattern even if it begins with '-',
     # preventing the user's search text from being parsed as a git flag.
     # '-z' NUL-separates the path/line/match fields so file paths that
     # contain colons parse correctly (the default ':' delimiter does not).
-    grep_raw = run_git("grep", "-n", "-z", "-e", searchtext, hash_id)
+    # search_use_regexp selects extended-regex (case-insensitive) vs fixed
+    # strings, matching gitweb.
+    use_regexp = params.get('sr', ['0'])[0] == '1'
+    if use_regexp:
+      grep_cmd = ["grep", "-n", "-z", "-E", "-i", "-e", searchtext, hash_id]
+    else:
+      grep_cmd = ["grep", "-n", "-z", "-F", "-e", searchtext, hash_id]
+    grep_raw = run_git(*grep_cmd)
     if grep_raw and grep_raw.strip("\n\0"):
       print('<table class="grep_results">')
       # Each record is "<rev>:<path>\0<line>\0<match>\n"; the rev prefix
@@ -1521,8 +1549,12 @@ def _generate_feed(feed_type):
           f'<link rel="alternate" type="text/html" href="{esc_html(commit_link)}" />')
       print(f'<id>{esc_html(commit_link)}</id>')
       print(f'<updated>{dt}</updated>')
+      print('<author>')
       print(
-          f'<author><name>{esc_html(co.get("author_name", co.get("author", "")))}</name></author>')
+          f'<name>{esc_html(co.get("author_name", co.get("author", "")))}</name>')
+      if co.get("author_email"):
+        print(f'<email>{esc_html(co["author_email"])}</email>')
+      print('</author>')
       print(
           f'<content type="text">{esc_html("\n".join(co["comment"]))}</content>')
       print('</entry>')

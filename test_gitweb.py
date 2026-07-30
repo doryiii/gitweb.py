@@ -706,6 +706,78 @@ class TestGitweb(unittest.TestCase):
     self.assertIn(b"Unknown action:", out)
     self.assertNotIn(b"\r", out)
 
+  # --- Parity fixes against gitweb.perl ---
+
+  def test_search_form_has_regexp_checkbox(self):
+    # The header search form must expose the 'sr' (re) checkbox, mirroring
+    # gitweb's print_search_form.
+    out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=summary")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn('name="sr"', out)
+    self.assertIn(">re<", out)
+    # And the hidden hash field the original includes.
+    self.assertIn('name="h"', out)
+
+  def test_search_commit_default_is_fixed_strings(self):
+    # Without 're', the pattern is a literal: "f.strings" does not match
+    # "f-strings".
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=commit&s=f.strings")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("No commits found.", out)
+
+  def test_search_commit_regexp_mode_matches(self):
+    # With 're', "f.strings" is a regex (. matches '-') -> matches the
+    # f-strings commit.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=commit&sr=1&s=f.strings")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Update main.py script to use f-strings", out)
+
+  def test_search_commit_is_case_insensitive(self):
+    # gitweb always passes --regexp-ignore-case.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=commit&s=INITIAL")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Initial commit: Add README.md", out)
+
+  def test_search_grep_default_is_fixed_strings(self):
+    # Without 're', grep uses -F: "Hello, .name" is literal and absent.
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=grep&s=Hello,%20.name")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("No matches found.", out)
+
+  def test_search_grep_regexp_mode_matches(self):
+    # With 're', grep uses -E -i: "Hello, .name" matches "Hello, {name".
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=grep&sr=1&s=Hello,%20.name")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("main.py", out)
+
+  def test_search_pickaxe_regexp_uses_pickaxe_regex(self):
+    # sr=1 pickaxe should still find the commit that introduced a regex
+    # pattern (equivalent to gitweb's -S --pickaxe-regex).
+    out, code = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=search&st=pickaxe&sr=1&s=Hello,%20.*")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("Add main.py script", out)
+
+  def test_atom_author_has_name_and_email(self):
+    # Atom <author> should split name and email, like gitweb.
+    out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=atom")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn("<name>Test User</name>", out)
+    self.assertIn("<email>test@example.com</email>", out)
+
 
 if __name__ == "__main__":
   unittest.main(verbosity=2)

@@ -19,6 +19,7 @@ A modernized, simplified Python 3 port of the original `gitweb.perl` CGI script.
 - `tree` (Directory listing)
 - `blob` (Syntax-highlighted file viewer)
 - `blob_plain` (Raw file download/streaming with MIME-type guessing)
+- `blame` (Basic line-by-line blame view; a simplified full-page rendering, not the AJAX-powered interactive UI)
 
 **Diffs & Changes**
 - `commitdiff` & `blobdiff` (HTML view of changes with support for both `inline` and `sidebyside` styles)
@@ -65,3 +66,8 @@ This project aims to be a simplified port, so several of the more advanced or ob
 - **Rich Remotes:** Our `remotes` view is a simple list of branches. The Perl version groups them by the actual remote name (e.g., `origin`) and displays their Fetch/Push URLs.
 - **Project Filtering:** The main `project_list` is missing the UI text box that allows users to quickly filter the list of projects by name/description.
 
+---
+
+## Testing
+
+The unit suite (`test_gitweb.py`) covers the Python implementation directly. In addition, `parity/` holds a **differential parity harness** that runs upstream `gitweb.perl` (pinned to git v2.54.0) and this port against the same fixture repo and compares the extracted semantic data, catching drift from upstream. Passing tests assert real parity; tests marked `xfail` document known, intentional divergences and serve as the "what to work on next" list. See `parity/README.md` for setup and details.

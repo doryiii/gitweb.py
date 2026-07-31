@@ -851,5 +851,70 @@ class TestGitweb(unittest.TestCase):
     self.assertIn("<email>test@example.com</email>", out)
 
 
+class TestDevServer(unittest.TestCase):
+  """Smoke-test the bundled serve.py dev server end to end."""
+
+  @classmethod
+  def setUpClass(cls):
+    import threading
+    import urllib.request
+    cls.urllib_request = urllib.request
+
+    # Reuse the TestGitweb fixture repo as PROJECT_ROOT.
+    cls.gitweb = TestGitweb()
+    cls.gitweb.setUpClass()
+    cls.root = cls.gitweb.project_root
+    cls.repo_name = cls.gitweb.repo_name
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import serve
+    cls.serve = serve
+    cls.server = serve.create_server(cls.root, "127.0.0.1", 0)
+    cls.port = cls.server.server_address[1]
+    cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+    cls.thread.start()
+
+  @classmethod
+  def tearDownClass(cls):
+    cls.server.shutdown()
+    cls.server.server_close()
+    cls.gitweb.tearDownClass()
+
+  def _get(self, path):
+    url = f"http://127.0.0.1:{self.port}{path}"
+    with self.urllib_request.urlopen(url) as r:
+      return r.status, r.read()
+
+  def test_home_page(self):
+    status, body = self._get("/")
+    self.assertEqual(status, 200)
+    body_s = body.decode("utf-8", "replace")
+    self.assertIn(self.repo_name, body_s)
+    # The dev server mounts at root, so the "projects" home link points home.
+    self.assertIn('href="/"', body_s)
+
+  def test_project_log(self):
+    status, body = self._get(f"/{self.repo_name}/log")
+    self.assertEqual(status, 200)
+    self.assertIn("Update main.py script to use f-strings",
+                  body.decode("utf-8", "replace"))
+
+  def test_static_css(self):
+    status, body = self._get("/static/gitweb.css")
+    self.assertEqual(status, 200)
+    self.assertIn(b"page_header", body)
+
+  def test_snapshot_binary_relayed(self):
+    # Snapshots write binary to stdout.buffer after the CGI headers; the
+    # relay must preserve the bytes and the Content-Type header.
+    url = f"http://127.0.0.1:{self.port}/{self.repo_name}/snapshot/HEAD?sf=tgz"
+    with self.urllib_request.urlopen(url) as r:
+      status, body = r.status, r.read()
+    self.assertEqual(status, 200)
+    self.assertEqual(r.headers.get("Content-Type"), "application/x-gzip")
+    # gzip magic bytes.
+    self.assertTrue(body[:2] == b"\x1f\x8b", "snapshot body is not gzip")
+
+
 if __name__ == "__main__":
   unittest.main(verbosity=2)

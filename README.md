@@ -2,6 +2,59 @@
 
 A modernized, simplified Python 3 port of the original `gitweb.perl` CGI script. It provides a web interface for browsing Git repositories, focusing on core functionality and ease of deployment in Python environments without relying on deprecated standard libraries like `cgi`.
 
+## Running
+
+`gitweb.py` is a CGI script: it reads request information from environment variables (`GITWEB_PROJECTROOT`, `PATH_INFO`, `QUERY_STRING`, `SCRIPT_NAME`) and writes an HTTP response to stdout. You need a webserver to run it.
+
+### Quick start — bundled dev server
+
+The easiest way to browse a directory of repos locally:
+
+```
+python serve.py --root /path/to/repos
+```
+
+Then open the printed URL (http://127.0.0.1:8000 by default). Options:
+
+- `--port` / `-p` — port (default `8000`)
+- `--bind` / `-b` — interface (default `127.0.0.1`; use `0.0.0.0` to expose on your LAN)
+
+This is a **development server**: it spawns one `gitweb.py` process per request, with no caching or HTTPS. It is intended for local browsing, not production.
+
+### Styling
+
+`static/gitweb.css` is vendored from git v2.54.0 (matching the parity oracle in `parity/`), so pages are styled out of the box. The logo and favicon referenced by `gitweb.py` (`static/git-logo.png`, `static/git-favicon.png`) are **not** bundled — drop them into `static/` from the same upstream directory (`git/git/static/`) if you want them.
+
+### Production CGI
+
+Set `GITWEB_PROJECTROOT` to the directory containing your bare repos, then point a CGI-capable webserver at `gitweb.py`. A few options:
+
+**lighttpd** (the canonical gitweb setup):
+```ini
+server.modules += ("mod_cgi", "mod_setenv")
+setenv.add-environment = ("GITWEB_PROJECTROOT" => "/path/to/repos")
+$HTTP["url"] =~ "^/" {
+  cgi.assign = ( "" => "" )
+  alias.url = ( "/" => "/path/to/gitweb.py" )
+}
+```
+
+**Apache**:
+```apache
+SetEnv GITWEB_PROJECTROOT /path/to/repos
+ScriptAlias /gitweb /path/to/gitweb.py
+```
+
+**nginx**: nginx has no CGI support; run `gitweb.py` behind `fcgiwrap` (or use the dev server / lighttpd instead).
+
+**Python stdlib** (zero dependencies, fiddly): `python -m http.server --cgi 8000` with `gitweb.py` placed in a `cgi-bin/` directory and `GITWEB_PROJECTROOT` exported in the environment.
+
+### Notes
+
+- All routing is GET-based; the port does not read POST bodies.
+- gitweb's JavaScript is not shipped, so JS-dependent UI (the timezone toggle, AJAX blame) is absent even though the static path is reserved.
+- The parity tests in `parity/` cover behavior; see `parity/README.md`.
+
 ## Supported Features
 
 **Project & Repository Navigation**

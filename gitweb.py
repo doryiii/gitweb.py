@@ -31,10 +31,13 @@ STRICT_EXPORT = False
 EXPORT_OK = ""
 LOGO_URL = "https://git-scm.com/"
 LOGO_LABEL = "git homepage"
-STYLESHEETS = ["static/gitweb.css"]
-LOGO = "static/git-logo.png"
-FAVICON = "static/git-favicon.png"
-JAVASCRIPT = "static/gitweb.js"
+# Root-relative so assets resolve at any path-info depth (a project page at
+# /proj.git/summary would otherwise resolve "static/..." to
+# /proj.git/static/...). Serve /static/ at the webserver root.
+STYLESHEETS = ["/static/gitweb.css"]
+LOGO = "/static/git-logo.png"
+FAVICON = "/static/git-favicon.png"
+JAVASCRIPT = "/static/gitweb.js"
 
 USE_HIGHLIGHT = True
 HIGHLIGHT_BIN = "/usr/bin/highlight"
@@ -297,8 +300,10 @@ def git_header_html(status="200 OK"):
     print(
         f'<img src="{esc_url(LOGO)}" width="72" height="27" alt="git" class="logo"/></a>')
 
-  # Breadcrumbs
-  home_link = href(project=None, action=None)
+  # Breadcrumbs. With SCRIPT_NAME="" (root mounting) href() returns "" for
+  # the project-less home link, which would navigate to the current page;
+  # fall back to "/" so "projects" always returns to the project list.
+  home_link = href(project=None, action=None) or "/"
   print(f'<a href="{esc_url(home_link)}">{esc_html(HOME_LINK_STR)}</a>')
   if project:
     print(

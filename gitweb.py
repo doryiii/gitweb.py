@@ -446,6 +446,69 @@ def parse_refs(ref_space, max_count=None):
   return refs
 
 
+def git_get_references(ref_type=""):
+  """Map commit/tag object SHA -> list of ref names (port of gitweb).
+
+  `git show-ref --dereference` emits `<sha> refs/<name>` for each ref and an
+  extra `<peeled-sha> refs/<name>^{}` for annotated tags, where the peeled
+  SHA is the commit the tag ultimately points to. The `^{}` suffix is what
+  format_ref_marker uses to tell indirect (annotated) tags from lightweight
+  ones."""
+  refs = {}
+  cmd = ["show-ref", "--dereference"]
+  if ref_type:
+    cmd += ["--", f"refs/{ref_type}"]
+  raw = run_git(*cmd)
+  if not raw:
+    return refs
+  for line in raw.strip().split("\n"):
+    if not line:
+      continue
+    m = re.match(r"^([0-9a-f]{40,64})\s+refs/(.+)$", line)
+    if m:
+      refs.setdefault(m.group(1), []).append(m.group(2))
+  return refs
+
+
+def format_ref_marker(refs, commit_id):
+  """Render the branch/tag labels next to a commit (port of gitweb).
+
+  Returns a leading-space-prefixed ` <span class="refs">…</span>` (so it can
+  be appended straight after a title) or "" when the commit has no refs."""
+  markers = ""
+  for ref in refs.get(commit_id, []):
+    # Annotated tags show up twice from show-ref: once under the tag object
+    # (non-indirect) and once under the peeled commit with a `^{}` suffix
+    # (indirect). Strip the suffix to detect indirect and to build dest.
+    indirect = ref.endswith("^{}")
+    if indirect:
+      ref = ref[:-3]
+    # "heads/main" -> head/main, "tags/v1.0" -> tag/v1.0 (the s? matches the
+    # singular/plural in head(s)/tag(s)/remote(s)).
+    m = re.match(r"^(.*?)s?/(.*)$", ref)
+    if m:
+      rtype, name = m.group(1), m.group(2)
+    else:
+      rtype, name = "ref", ref
+    cls = rtype + (" indirect" if indirect else "")
+
+    dest_action = "shortlog"
+    if indirect:
+      if action != "tag":
+        dest_action = "tag"
+    elif action in ("history", "shortlog", "log"):
+      dest_action = action
+
+    dest = ref if ref.startswith("refs/") else "refs/" + ref
+    link = href(project=project, action=dest_action, hash=dest)
+    markers += (f' <span class="{esc_html(cls)}" title="{esc_html(ref)}">'
+                f'<a href="{esc_url(link)}">{esc_html(name)}</a></span>')
+
+  if markers:
+    return f' <span class="refs">{markers}</span>'
+  return ""
+
+
 def parse_tag(tag_id):
   raw = run_git("cat-file", "tag", tag_id)
   if raw is None:
@@ -678,6 +741,7 @@ def git_summary():
   print('<h2>Recent commits</h2>')
   log_raw = run_git("rev-list", "--max-count=5", "HEAD")
   if log_raw:
+    refs = git_get_references()
     print('<table class="shortlog">')
     for commit_id in log_raw.strip().split("\n"):
       co = parse_commit(commit_id)
@@ -687,7 +751,8 @@ def git_summary():
         print(
             f'<tr><td>{dt}</td><td><a href="{esc_url(url)}" class="list">{esc_html(co.get("author", ""))}</a></td>')
         print(
-            f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a></td>')
+            f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a>'
+            f'{format_ref_marker(refs, commit_id)}</td>')
         diff_url = href(project=project, action="commitdiff", hash=commit_id)
         patch_url = href(project=project, action="patch", hash=commit_id)
         tree_url = href(project=project, action="tree", hash=commit_id)
@@ -926,6 +991,7 @@ def git_shortlog():
   if not commits:
     print('<p>No commits found.</p>')
   else:
+    refs = git_get_references()
     print('<table class="shortlog">')
     for commit_id in commits:
       co = parse_commit(commit_id)
@@ -934,7 +1000,8 @@ def git_shortlog():
         dt = commit_datetime(co).strftime("%Y-%m-%d")
         print(f'<tr><td>{dt}</td><td>{esc_html(co.get("author", ""))}</td>')
         print(
-            f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a></td>')
+            f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a>'
+            f'{format_ref_marker(refs, commit_id)}</td>')
         diff_url = href(project=project, action="commitdiff", hash=commit_id)
         patch_url = href(project=project, action="patch", hash=commit_id)
         print(
@@ -962,17 +1029,18 @@ def git_log():
     print('<p>No commits found.</p>')
   else:
     now = time.time()
+    refs = git_get_references()
     for commit_id in commits:
       co = parse_commit(commit_id)
       if not co:
         continue
       age = age_string(now - co.get('committer_epoch', now))
       commit_url = href(project=project, action="commit", hash=commit_id)
-      # Header: age + title, linked to the commit (upstream also appends ref
-      # markers here; the port does not yet show branch/tag decorations).
+      # Header: age + title + branch/tag markers, linked to the commit.
       print('<div class="header">')
       print(f'<a class="title" href="{esc_url(commit_url)}">'
             f'<span class="age">{esc_html(age)}</span>{esc_html(co["title"])}'
+            f'{format_ref_marker(refs, commit_id)}'
             f'</a>')
       print('</div>')
       # Author/date + the commit|commitdiff|tree link row.
@@ -1235,7 +1303,8 @@ def git_commit():
   co = parse_commit(hash_id)
   git_header_html()
   if co:
-    print(f'<h1>Commit {esc_html(hash_id)}</h1>')
+    refs = git_get_references()
+    print(f'<h1>Commit {esc_html(hash_id)}{format_ref_marker(refs, co["id"])}</h1>')
     print(f'<p>Author: {esc_html(co.get("author", ""))}</p>')
     print(f'<p>Committer: {esc_html(co.get("committer", ""))}</p>')
     print('<pre>')
@@ -1572,6 +1641,7 @@ def git_search():
       log_raw = run_git(*cmd)
 
     if log_raw and log_raw.strip():
+      refs = git_get_references()
       print('<table class="shortlog">')
       for commit_id in log_raw.strip().split("\n"):
         co = parse_commit(commit_id)
@@ -1580,7 +1650,8 @@ def git_search():
           dt = commit_datetime(co).strftime("%Y-%m-%d")
           print(f'<tr><td>{dt}</td><td>{esc_html(co.get("author", ""))}</td>')
           print(
-              f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a></td></tr>')
+              f'<td><a href="{esc_url(url)}" class="list">{esc_html(co["title"])}</a>'
+              f'{format_ref_marker(refs, commit_id)}</td></tr>')
       print('</table>')
     else:
       print('<p>No commits found.</p>')

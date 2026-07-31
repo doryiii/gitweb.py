@@ -49,6 +49,20 @@ def shortlog_shas(raw: bytes) -> list:
     return _dedup(re.findall(rf"/commit/({_SHA40})", text(raw)))
 
 
+def ref_marker_names(raw: bytes) -> list:
+    """Sorted set of branch/tag labels shown next to commits (ref markers).
+
+    Both implementations render markers as anchors pointing to a ref under
+    /<action>/refs/... (e.g. /shortlog/refs/heads/main, /tag/refs/tags/v1.0).
+    Those are the only /refs/ links on a log/shortlog page, so collecting
+    their anchor texts sidesteps the nested <span class="refs"> markup, which
+    differs between the two implementations."""
+    names = re.findall(
+        r'<a [^>]*href="[^"]*/(?:shortlog|log|tag|history)/refs/[^"]*"[^>]*>'
+        r'([^<]*)</a>', text(raw))
+    return sorted(set(names))
+
+
 def tree_entries(raw: bytes) -> list:
     """List of (type, name) for tree rows, scoped to <table class="tree">.
 

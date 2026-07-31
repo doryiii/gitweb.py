@@ -53,6 +53,19 @@ def test_log_body_messages(fixture):
     assert e.log_body_messages(up) == e.log_body_messages(ours)
 
 
+def test_log_ref_markers(fixture):
+    # Branch/tag labels next to commits.  The fixture has heads (main,
+    # feature), a lightweight tag (v0.1) and an annotated tag (v1.0), so
+    # this covers non-indirect and indirect (annotated) markers.
+    up, ours = req(fixture, "log", h="HEAD")
+    assert e.ref_marker_names(up) == e.ref_marker_names(ours)
+
+
+def test_shortlog_ref_markers(fixture):
+    up, ours = req(fixture, "shortlog", h="HEAD")
+    assert e.ref_marker_names(up) == e.ref_marker_names(ours)
+
+
 # --- tree -----------------------------------------------------------------
 
 def test_tree_root_entries(fixture):

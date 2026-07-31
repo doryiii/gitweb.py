@@ -145,6 +145,21 @@ class TestGitweb(unittest.TestCase):
     self.assertIn('<table class="shortlog">', short_out)
     self.assertNotIn('<div class="log_body">', short_out)
 
+  def test_log_shows_ref_markers(self):
+    # The testrepo has branch `feature-branch` and annotated tag `v1.0` at
+    # HEAD, so the log view should decorate the HEAD commit with both.
+    # (Don't assert the default branch name -- it varies by git config.)
+    out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=log")
+    self.assertEqual(code, 0)
+    self.assertResponseOK(out)
+    self.assertIn('class="refs"', out)
+    self.assertIn("feature-branch", out)
+    self.assertIn("v1.0", out)
+    # Annotated tag marker links to the `tag` action; in the log view a
+    # branch marker links to the `log` action (the current action).
+    self.assertIn("/tag/refs/tags/v1.0", out)
+    self.assertIn("/log/refs/heads/feature-branch", out)
+
   def test_tree(self):
     out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=tree")
     self.assertEqual(code, 0)

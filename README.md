@@ -98,6 +98,7 @@ ScriptAlias /gitweb /path/to/gitweb.py
 **Core System Capabilities**
 - Clean URLs (Path-info based routing)
 - Breadcrumb navigation
+- Ref markers (branch/tag labels next to commits)
 - Syntax Highlighting (via the external `highlight` binary)
 
 ---

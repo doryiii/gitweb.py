@@ -45,6 +45,14 @@ def test_log_shas(fixture):
     assert e.shortlog_shas(up) == e.shortlog_shas(ours)
 
 
+def test_log_body_messages(fixture):
+    # The expanded `log` view shows each commit's full message body inline
+    # (shortlog does not).  Both implementations render log_body divs with
+    # the same per-commit message content.
+    up, ours = req(fixture, "log", h="HEAD")
+    assert e.log_body_messages(up) == e.log_body_messages(ours)
+
+
 # --- tree -----------------------------------------------------------------
 
 def test_tree_root_entries(fixture):

@@ -10,7 +10,8 @@ A modernized, simplified Python 3 port of the original `gitweb.perl` CGI script.
 - `summary` (Project overview, description, owner, clone URLs)
 
 **Browsing History & Commits**
-- `log` / `shortlog` (List of recent commits)
+- `log` (Expanded view: per-commit age + title, author/date, a commit|commitdiff|tree link row, and the full multi-line commit message inline)
+- `shortlog` (Compact one-line-per-commit table)
 - `history` (Commit history filtered for a specific file/directory)
 - `commit` (Detailed view of a single commit, including its message and parent links)
 - `object` (Automatic redirection based on whether a hash is a commit, tree, blob, or tag)
@@ -53,7 +54,6 @@ A modernized, simplified Python 3 port of the original `gitweb.perl` CGI script.
 This project aims to be a simplified port, so several of the more advanced or obscure features from the original `gitweb.perl` are currently missing:
 
 **Missing Endpoints & Views**
-- **Full `log` View:** Currently, our `log` endpoint acts as a `shortlog` (listing just the commit titles). We are missing the "expanded" log view that shows the full, multi-line commit messages inline.
 - `blame_incremental` & `blame_data` (The backend endpoints required for the interactive, AJAX-powered, line-by-line blame view)
 - `forks` (A dedicated page to list and navigate forks of a project)
 - `opml` (An XML endpoint that aggregates all project RSS/Atom feeds into one outline)

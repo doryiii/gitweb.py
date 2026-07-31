@@ -132,6 +132,19 @@ class TestGitweb(unittest.TestCase):
     self.assertIn("Add main.py script", out)
     self.assertIn("Update main.py script to use f-strings", out)
 
+  def test_log_is_expanded_shortlog_is_compact(self):
+    # `log` is the expanded view: per-commit log_body with the full message
+    # plus author/date and a commit|commitdiff|tree link row.
+    log_out, _ = self.run_cgi(query_string=f"p={self.repo_name}&a=log")
+    self.assertIn('<div class="log_body">', log_out)
+    self.assertIn('<div class="log_link">', log_out)
+    self.assertIn('<span class="author_date">', log_out)
+    # `shortlog` is the compact one-line table; it has no log_body sections.
+    short_out, _ = self.run_cgi(
+        query_string=f"p={self.repo_name}&a=shortlog")
+    self.assertIn('<table class="shortlog">', short_out)
+    self.assertNotIn('<div class="log_body">', short_out)
+
   def test_tree(self):
     out, code = self.run_cgi(query_string=f"p={self.repo_name}&a=tree")
     self.assertEqual(code, 0)
@@ -453,7 +466,8 @@ class TestGitweb(unittest.TestCase):
   def test_commit_date_uses_commit_timezone(self):
     # 03:30+0500 == 2019-12-31 22:30 UTC. The commit-local date is
     # 2020-01-01; rendering in the server's TZ (forced to UTC here)
-    # would show 2019-12-31.
+    # would show 2019-12-31. The compact shortlog date column renders the
+    # committer date in the commit's own timezone.
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp)
       repo, run_git = self._make_repo(root / "tz.git")
@@ -466,7 +480,7 @@ class TestGitweb(unittest.TestCase):
       subprocess.run(["git", "commit", "-m", "tz commit"], cwd=repo,
                      check=True, capture_output=True, env=env)
 
-      out, code = self.run_cgi(query_string="p=tz.git&a=log",
+      out, code = self.run_cgi(query_string="p=tz.git&a=shortlog",
                                project_root=str(root),
                                extra_env={"TZ": "UTC"})
       self.assertEqual(code, 0)
@@ -488,6 +502,30 @@ class TestGitweb(unittest.TestCase):
       self.assertResponseOK(out)
       # The four-space indent must survive (lstrip used to drop it).
       self.assertIn("    indented code line", out)
+
+  def test_log_renders_full_message_and_signoff(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      repo, run_git = self._make_repo(root / "body.git")
+      subprocess.run(["git", "commit", "--allow-empty",
+                      "-m", "Add feature",
+                      "-m", "Body line one.\n\n\nBody line two.",
+                      "-m", "Signed-off-by: Test User <test@example.com>"],
+                     cwd=repo, check=True, capture_output=True)
+
+      out, code = self.run_cgi(query_string="p=body.git&a=log",
+                               project_root=str(root))
+      self.assertEqual(code, 0)
+      self.assertResponseOK(out)
+      # Expanded body shows the full message, not just the subject.
+      self.assertIn("Body&nbsp;line&nbsp;one.", out)
+      self.assertIn("Body&nbsp;line&nbsp;two.", out)
+      # Sign-off lines are wrapped in a signoff span.
+      self.assertIn('<span class="signoff">', out)
+      self.assertIn("Signed-off-by:", out)
+      # Runs of blank lines collapse to a single break (three blank lines
+      # in the source become one <br/> separator, not three).
+      self.assertNotIn("<br/><br/><br/>", out)
 
   def test_nested_project_listed(self):
     with tempfile.TemporaryDirectory() as tmp:

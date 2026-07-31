@@ -127,6 +127,39 @@ def commit_datetime(co, who='committer'):
   return datetime.fromtimestamp(epoch, tz=timezone(offset))
 
 
+def age_string(age):
+  """Human-readable "N units ago" for an age in seconds (port of gitweb)."""
+  if age > 60 * 60 * 24 * 365 * 2:
+    return f"{int(age / 60 / 60 / 24 / 365)} years ago"
+  if age > 60 * 60 * 24 * (365 / 12) * 2:
+    return f"{int(age / 60 / 60 / 24 / (365 / 12))} months ago"
+  if age > 60 * 60 * 24 * 7 * 2:
+    return f"{int(age / 60 / 60 / 24 / 7)} weeks ago"
+  if age > 60 * 60 * 24 * 2:
+    return f"{int(age / 60 / 60 / 24)} days ago"
+  if age > 60 * 60 * 2:
+    return f"{int(age / 60 / 60)} hours ago"
+  if age > 60 * 2:
+    return f"{int(age / 60)} min ago"
+  if age > 2:
+    return f"{int(age)} sec ago"
+  return " right now"
+
+
+def format_timestamp_html(co, who='author'):
+  """`rfc2822 (HH:MM tz)` for a commit's author/committer date, matching
+  gitweb's format_timestamp_html: the rfc2822 part is always UTC, the
+  parenthetical is the wall-clock time in the commit's own timezone."""
+  epoch = co.get(f'{who}_epoch')
+  if epoch is None:
+    return ''
+  rfc2822 = datetime.fromtimestamp(
+      epoch, tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+  local = commit_datetime(co, who=who).strftime("%H:%M")
+  tz = co.get(f'{who}_tz', '+0000')
+  return f'<span class="datetime">{esc_html(rfc2822)}</span> ({local} {tz})'
+
+
 def href(**kwargs):
   global my_url, my_uri, project, params
 
@@ -781,7 +814,9 @@ def git_tag():
   git_footer_html()
 
 
-def git_log():
+def _log_setup():
+  """Resolve (hash_id, file_name, page) for log/shortlog/history views and
+  point git_dir at the current project."""
   global git_dir, hash_id
   path = os.path.join(PROJECT_ROOT, project)
   git_dir = os.path.join(path, ".git") if os.path.exists(
@@ -789,53 +824,99 @@ def git_log():
 
   if not hash_id:
     hash_id = params.get('h', ['HEAD'])[0]
-
   file_name = params.get('f', [None])[0]
-
   try:
     pg = int(params.get('pg', ['0'])[0])
   except ValueError:
     pg = 0
+  return hash_id, file_name, pg
 
-  page_size = 100
+
+def _log_commits(hash_id, file_name, pg, page_size=100):
+  """Return (commits, has_next) for one page of rev-list output, optionally
+  restricted to a path. Fetches page_size+1 so the extra commit signals a
+  next page (matching gitweb's 101/100 paging)."""
   skip = pg * page_size
-
-  git_header_html()
-
-  title = f'Log for {esc_html(hash_id)}'
-  if file_name:
-    title += f' : {esc_html(file_name)}'
-  print(f'<h1>{title}</h1>')
-
-  cmd = ["rev-list", f"--skip={skip}", f"--max-count={page_size + 1}", hash_id]
+  cmd = ["rev-list", f"--skip={skip}", f"--max-count={page_size + 1}",
+         hash_id]
   if file_name:
     cmd.extend(["--", file_name])
-
   log_raw = run_git(*cmd)
-
-  commits = []
-  if log_raw:
-    commits = [c for c in log_raw.strip().split("\n") if c]
-
+  commits = [c for c in (log_raw.strip().split("\n") if log_raw else []) if c]
   has_next = len(commits) > page_size
-  commits = commits[:page_size]
+  return commits[:page_size], has_next
 
-  # Pagination UI
+
+def _paging_nav(hash_id, file_name, pg, has_next):
+  """prev/next navigation, replaying the current action (log/shortlog/...)."""
+  action = params.get("a", ["log"])[0]
   print('<div class="page_nav">')
   if pg > 0:
-    prev_url = href(project=project, action=params.get("a", ["log"])[
-                    0], hash=hash_id, file_name=file_name, page=pg-1)
+    prev_url = href(project=project, action=action, hash=hash_id,
+                    file_name=file_name, page=pg - 1)
     print(f'<a href="{esc_url(prev_url)}">prev</a> | ')
   else:
     print('prev | ')
-
   if has_next:
-    next_url = href(project=project, action=params.get("a", ["log"])[
-                    0], hash=hash_id, file_name=file_name, page=pg+1)
+    next_url = href(project=project, action=action, hash=hash_id,
+                    file_name=file_name, page=pg + 1)
     print(f'<a href="{esc_url(next_url)}">next</a>')
   else:
     print('next')
   print('</div>')
+
+
+def _print_log(comment, remove_title=False, final_empty_line=False):
+  """Render a commit message body, porting gitweb's git_print_log: drop the
+  title/leading blanks on request, collapse runs of blank lines, wrap
+  sign-off/`link:` lines, and use non-breaking spaces (gitweb renders log
+  bodies with -nbsp so leading/interior spacing is preserved)."""
+  lines = list(comment)
+  if remove_title and lines:
+    lines = lines[1:]
+  while lines and lines[0] == "":
+    lines.pop(0)
+
+  skip_blank = False
+  for line in lines:
+    # Signed-off-by / Cc / Closes / Fixes / Foo-by: ...
+    if re.match(r'^\s*([A-Z][-A-Za-z]*-([Bb]y|[Tt]o)|C[Cc]|(Clos|Fix)es): ',
+                line):
+      print(f'<span class="signoff">{esc_html(line).replace(" ", "&nbsp;")}'
+            f'</span><br/>')
+      skip_blank = True
+      continue
+    # "link: <url>" (case-insensitive)
+    m = re.match(r'\s*([a-z]*link): (https?://\S+)', line, re.I)
+    if m:
+      print(f'<span class="signoff">{esc_html(m.group(1)).replace(" ", "&nbsp;")}: '
+            f'<a href="{esc_html(m.group(2))}">{esc_html(m.group(2))}</a>'
+            f'</span><br/>')
+      skip_blank = True
+      continue
+    if line == "":
+      if skip_blank:
+        continue
+      skip_blank = True
+    else:
+      skip_blank = False
+    print(f'{esc_html(line).replace(" ", "&nbsp;")}<br/>')
+
+  if final_empty_line and not skip_blank:
+    print('<br/>')
+
+
+def git_shortlog():
+  """Compact one-line-per-commit table (also used by `history`)."""
+  hash_id, file_name, pg = _log_setup()
+  commits, has_next = _log_commits(hash_id, file_name, pg)
+
+  git_header_html()
+  title = f'Log for {esc_html(hash_id)}'
+  if file_name:
+    title += f' : {esc_html(file_name)}'
+  print(f'<h1>{title}</h1>')
+  _paging_nav(hash_id, file_name, pg, has_next)
 
   if not commits:
     print('<p>No commits found.</p>')
@@ -854,6 +935,67 @@ def git_log():
         print(
             f'<td class="link"><a href="{esc_url(diff_url)}">commitdiff</a> | <a href="{esc_url(patch_url)}">patch</a></td></tr>')
     print('</table>')
+
+  git_footer_html()
+
+
+def git_log():
+  """Expanded log view: per-commit header (age + title), author/date, a
+  commit|commitdiff|tree link row, and the full commit message body -- as
+  opposed to `shortlog`, which is the compact one-line table."""
+  hash_id, file_name, pg = _log_setup()
+  commits, has_next = _log_commits(hash_id, file_name, pg)
+
+  git_header_html()
+  title = f'Log for {esc_html(hash_id)}'
+  if file_name:
+    title += f' : {esc_html(file_name)}'
+  print(f'<h1>{title}</h1>')
+  _paging_nav(hash_id, file_name, pg, has_next)
+
+  if not commits:
+    print('<p>No commits found.</p>')
+  else:
+    now = time.time()
+    for commit_id in commits:
+      co = parse_commit(commit_id)
+      if not co:
+        continue
+      age = age_string(now - co.get('committer_epoch', now))
+      commit_url = href(project=project, action="commit", hash=commit_id)
+      # Header: age + title, linked to the commit (upstream also appends ref
+      # markers here; the port does not yet show branch/tag decorations).
+      print('<div class="header">')
+      print(f'<a class="title" href="{esc_url(commit_url)}">'
+            f'<span class="age">{esc_html(age)}</span>{esc_html(co["title"])}'
+            f'</a>')
+      print('</div>')
+      # Author/date + the commit|commitdiff|tree link row.
+      print('<div class="title_text">')
+      print('<div class="log_link">')
+      commitdiff_url = href(project=project, action="commitdiff",
+                            hash=commit_id)
+      tree_url = href(project=project, action="tree", hash=commit_id,
+                      hash_base=commit_id)
+      print(f'<a href="{esc_url(commit_url)}">commit</a> | '
+            f'<a href="{esc_url(commitdiff_url)}">commitdiff</a> | '
+            f'<a href="{esc_url(tree_url)}">tree</a><br/>')
+      print('</div>')
+      author = co.get('author_name', '')
+      author_search = href(project=project, action="search", hash=hash_id,
+                           searchtext=author, searchtype="author")
+      print(f'<span class="author_date">'
+            f'<a class="list" href="{esc_url(author_search)}" '
+            f'title="Search for commits authored by {esc_html(author)}">'
+            f'{esc_html(author)}</a> '
+            f'[{format_timestamp_html(co, "author")}]</span>')
+      print('<br/>')
+      print('</div>')
+      # Full message body (upstream prints the whole comment, title
+      # included, after the header -- so the subject appears twice).
+      print('<div class="log_body">')
+      _print_log(co['comment'], final_empty_line=True)
+      print('</div>')
 
   git_footer_html()
 
@@ -1076,7 +1218,7 @@ def git_blob_plain():
 
 
 def git_history():
-  git_log()
+  git_shortlog()
 
 
 def git_commit():
@@ -1686,7 +1828,7 @@ ACTIONS = {
     "snapshot": git_snapshot,
     "patch": git_patch,
     "patches": git_patches,
-    "shortlog": git_log,
+    "shortlog": git_shortlog,
     "object": git_object,
     "project_index": git_project_index,
 }

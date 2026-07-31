@@ -205,3 +205,22 @@ def commit_message(raw: bytes) -> str:
         return ""
     s = re.sub(r"<[^>]+>", "", m.group(1))
     return html.unescape(s).replace("\xa0", " ").strip()
+
+
+def log_body_messages(raw: bytes) -> list:
+    """Normalized message body of each commit on a log/shortlog page.
+
+    Both implementations render the expanded `log` view with
+    <div class="log_body">...</div> per commit (upstream prints the whole
+    message, title included).  Strip tags, unescape entities, turn the
+    &nbsp; gitweb uses back into spaces, and collapse to a single line so
+    the comparison is on message content, not whitespace markup."""
+    out = []
+    for m in re.finditer(r'<div class="log_body">(.*?)</div>',
+                         text(raw), re.S):
+        s = re.sub(r"<[^>]+>", "", m.group(1))
+        s = html.unescape(s).replace("\xa0", " ")
+        s = " ".join(s.split()).strip()
+        if s:
+            out.append(s)
+    return out

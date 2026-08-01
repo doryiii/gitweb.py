@@ -211,6 +211,28 @@ def href(**kwargs):
   return url
 
 
+def self_url():
+  """Reconstruct the request's own URL (scheme://host/script?query),
+  mirroring gitweb's $cgi->self_url for the X-Git-Url header in plain
+  diff/patch output.  Host falls back to 'localhost' when no Host /
+  Server-Name header is present (as in the parity harness), and params
+  are joined with ';' to match CGI.pm's separator."""
+  https = os.environ.get("HTTPS", "").lower()
+  scheme = "https" if https in ("on", "1") else "http"
+  host = os.environ.get("HTTP_HOST") or os.environ.get("SERVER_NAME") or "localhost"
+  script = os.environ.get("SCRIPT_NAME", "")
+  # CGI.pm's escape encodes '/' (and everything else outside the
+  # unreserved set), so a file path like 'src/main.py' becomes
+  # 'src%2Fmain.py' -- quote with safe='' to match, rather than
+  # esc_param which leaves '/' unencoded.
+  query = ";".join(f"{name}={urllib.parse.quote(to_utf8(vals[0]), safe='')}"
+                   for name, vals in params.items())
+  url = f"{scheme}://{host}{script}"
+  if query:
+    url += f"?{query}"
+  return url
+
+
 def git_cmd():
   cmd = [GIT]
   if git_dir:
@@ -469,6 +491,20 @@ def git_get_references(ref_type=""):
     if m:
       refs.setdefault(m.group(1), []).append(m.group(2))
   return refs
+
+
+def git_get_rev_name_tags(commit_id):
+  """Return the tag name closest to commit_id (a la `git name-rev --tags`),
+  or None -- port of gitweb's git_get_rev_name_tags.  The output line must
+  be exactly '<commit_id> tags/<name>' (a bare 'undefined' yields None)."""
+  out = run_git("name-rev", "--tags", commit_id)
+  if not out:
+    return None
+  line = out.strip().split("\n", 1)[0]
+  prefix = f"{commit_id} tags/"
+  if line.startswith(prefix):
+    return line[len(prefix):]
+  return None
 
 
 def format_ref_marker(refs, commit_id):
@@ -1371,7 +1407,7 @@ def git_commit():
 
 
 def git_blobdiff_plain():
-  git_commitdiff(format='plain')
+  git_commitdiff(format='plain', blobdiff=True)
 
 
 def git_commitdiff_plain():
@@ -1426,7 +1462,7 @@ def print_diff_lines(ctx, rem, add, diff_style):
       print(f'<div class="add">{esc_html(line)}</div>')
 
 
-def git_commitdiff(format='html', single=False):
+def git_commitdiff(format='html', single=False, blobdiff=False):
   global git_dir, hash_id, params
   path = os.path.join(PROJECT_ROOT, project)
   git_dir = os.path.join(path, ".git") if os.path.exists(
@@ -1483,32 +1519,73 @@ def git_commitdiff(format='html', single=False):
     return
 
   if format == 'plain':
-    cmd = ["diff-tree", "-r", "-p", "--full-index", "--no-commit-id"]
-    # Enable rename detection when comparing an old path to a new one
-    # (blobdiff with file_parent), so the result is a single rename diff
-    # rather than a separate delete+add.
-    if file_parent and file_parent != file_name:
-      cmd.append("-M")
-    if hash_parent:
-      if hash_parent == "--root":
-        cmd.extend(["--root", hash_id])
-      else:
-        cmd.extend([hash_parent, hash_id])
-    elif hash_parent_base and hash_base:
-      cmd.extend([hash_parent_base, hash_base])
-    else:
-      cmd.extend(["--root", hash_id])
+    # blobdiff_plain (a blob-to-blob diff) and commitdiff_plain (an
+    # mbox-formatted patch) share this path.  Upstream emits only an
+    # X-Git-Url line for blobdiff, but a full mbox header block
+    # (From:/Date:/Subject:/X-Git-Tag:/X-Git-Url:) plus the commit
+    # message and a `diff-tree -r -M -p` diff for commitdiff.  The diff
+    # uses short SHAs (no --full-index), matching upstream.
+    # blobdiff_plain is routed here with blobdiff=True; the action is the
+    # source of truth (upstream has separate subroutines), since `hp` is
+    # ambiguous -- a parent commit in commitdiff, a parent blob in
+    # blobdiff -- and would otherwise misroute when a blob hash is given.
+    is_blobdiff = blobdiff or (not hash_parent and bool(
+        hash_parent_base and hash_base))
 
-    if file_name:
-      if "--" not in cmd:
-        cmd.append("--")
+    if is_blobdiff:
+      cmd = ["diff-tree", "-r", "-M", "-p", hash_parent_base, hash_base, "--"]
       if file_parent:
         cmd.append(file_parent)
-      cmd.append(file_name)
+      if file_name:
+        cmd.append(file_name)
+      diff = run_git(*cmd)
+      disp_name = esc_header(file_name or (hash_base or "")) + ".patch"
+      print("Status: 200 OK")
+      print("Content-Type: text/plain; charset=utf-8")
+      print(f'Content-Disposition: inline; filename="{disp_name}"')
+      print()
+      print(f"X-Git-Url: {self_url()}")
+      print()
+      if diff:
+        print(diff)
+      return
+
+    # commitdiff_plain: mbox-style header block + message + diff.
+    cmd = ["diff-tree", "-r", "-M", "-p"]
+    if hash_parent:
+      cmd.append(hash_parent)
+    cmd.append(hash_id)
+    cmd.append("--")
 
     diff = run_git(*cmd)
+    filename = f"{os.path.basename(project)}-{hash_id}.patch"
     print("Status: 200 OK")
     print("Content-Type: text/plain; charset=utf-8")
+    print(f'Content-Disposition: inline; filename="{esc_header(filename)}"')
+    print()
+    # mbox header block (text/plain, so values are emitted raw, not
+    # HTML-escaped -- 'From: Name <email>' must keep its angle brackets).
+    print(f"From: {co.get('author', '')}")
+    epoch = co.get('author_epoch')
+    if epoch is None:
+      rfc2822 = "Thu, 1 Jan 1970 00:00:00 +0000"
+    else:
+      dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+      _days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+      _months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+      rfc2822 = (f"{_days[dt.weekday()]}, {dt.day} {_months[dt.month - 1]} "
+                 f"{dt.year} {dt.hour:02d}:{dt.minute:02d}:{dt.second:02d} +0000")
+    print(f"Date: {rfc2822} ({co.get('author_tz', '-0000')})")
+    print(f"Subject: {co.get('title', '')}")
+    tagname = git_get_rev_name_tags(hash_id)
+    if tagname:
+      print(f"X-Git-Tag: {tagname}")
+    print(f"X-Git-Url: {self_url()}")
+    print()
+    for line in co.get('comment', []):
+      print(line)
+    print("---")
     print()
     if diff:
       print(diff)
@@ -1934,7 +2011,7 @@ ACTIONS = {
     "commit": git_commit,
     "commitdiff": git_commitdiff,
     "blobdiff": git_commitdiff,
-    "blobdiff_plain": git_commitdiff_plain,
+    "blobdiff_plain": git_blobdiff_plain,
     "commitdiff_plain": git_commitdiff_plain,
     "blame": git_blame,
     "search": git_search,

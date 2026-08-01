@@ -8,6 +8,7 @@ test turning into a hard failure is a regression.
 """
 import sys
 import html
+import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
@@ -173,28 +174,35 @@ def test_blob_plain_body(fixture):
         assert e.blob_plain_body(up) == e.blob_plain_body(ours), f
 
 
-@pytest.mark.xfail(reason="upstream commitdiff_plain emits mbox-style "
-                          "From:/Subject: headers (format-patch-like); we "
-                          "emit a raw diff-tree diff")
 def test_commitdiff_plain_body(fixture):
     up, ours = req(fixture, "commitdiff_plain", h="HEAD")
     assert e.raw_text_body(up) == e.raw_text_body(ours)
 
 
-@pytest.mark.xfail(reason="upstream commitdiff_plain emits mbox-style "
-                          "From:/Date:/Subject: headers (format-patch-like); "
-                          "we emit a raw diff-tree diff with no headers")
 def test_commitdiff_plain_mbox_headers(fixture):
-    # Pinpoints *what* about commitdiff_plain still diverges, so the gap
-    # is characterized rather than just "bodies differ": the desired
-    # parity is that ours lead with the same mbox-style header block
-    # (From:/Date:/Subject:) upstream emits, instead of a bare diff.
+    # Confirms the mbox-style header block (From:/Date:/Subject:/
+    # X-Git-Tag:/X-Git-Url:) preceding the diff, matching upstream.
     up, ours = req(fixture, "commitdiff_plain", h="HEAD")
     up_body = e.raw_text_body(up)
     ours_body = e.raw_text_body(ours)
-    assert up_body.startswith("From: ")      # upstream has the header block
-    assert ours_body.startswith("From: ")    # we currently do not (xfail)
+    assert up_body.startswith("From: ")
+    assert ours_body.startswith("From: ")
     assert "\nSubject: " in ours_body
+    assert "\nX-Git-Url: " in ours_body
+
+
+def test_blobdiff_plain_body(fixture):
+    # blobdiff_plain is a bare X-Git-Url line + a blob-to-blob diff (no
+    # mbox headers).  Also guards the action routing: blobdiff_plain must
+    # dispatch to git_blobdiff_plain, not git_commitdiff_plain.  Upstream
+    # requires full SHAs for hpb/hb, so resolve them from the fixture.
+    root, name = fixture
+    def rev(ref):
+        return subprocess.run(["git", "-C", str(root / name), "rev-parse", ref],
+                              capture_output=True, text=True).stdout.strip()
+    up, ours = req(fixture, "blobdiff_plain",
+                   hpb=rev("HEAD^"), hb=rev("HEAD"), f="src/main.py")
+    assert e.raw_text_body(up) == e.raw_text_body(ours)
 
 
 def test_patch_body(fixture):

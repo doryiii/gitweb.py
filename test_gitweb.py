@@ -706,16 +706,25 @@ class TestGitweb(unittest.TestCase):
       # The root entry must not leak through with a mis-prefixed path.
       self.assertNotIn("sub/top.txt", out)
 
-  def test_plain_diff_has_no_stray_commit_id(self):
-    # commitdiff_plain must start the body with "diff --git", not a bare
-    # commit hash line (missing --no-commit-id used to emit one).
+  def test_commitdiff_plain_mbox_headers(self):
+    # commitdiff_plain emits an mbox-style header block (From:/Date:/
+    # Subject:/X-Git-Url:) followed by the message and the diff, matching
+    # upstream gitweb -- not a bare diff-tree diff.
     out, code = self.run_cgi(
         query_string=f"p={self.repo_name}&a=commitdiff_plain&h=HEAD")
     self.assertEqual(code, 0)
     self.assertResponseOK(out)
     body = out.split("\n\n", 1)[1] if "\n\n" in out else out
-    self.assertTrue(body.lstrip().startswith("diff --git"),
-                    f"plain diff body should start with diff --git, got: {body[:60]!r}")
+    self.assertTrue(body.startswith("From: "),
+                    f"body should start with 'From:', got: {body[:60]!r}")
+    self.assertIn("\nSubject: ", body)
+    self.assertIn("\nX-Git-Url: ", body)
+    # The diff follows the '---' separator and must start with 'diff --git',
+    # not a bare commit hash line (a missing --no-commit-id used to emit one).
+    self.assertIn("\n---\n", body)
+    diff_part = body.split("\n---\n", 1)[1].lstrip()
+    self.assertTrue(diff_part.startswith("diff --git"),
+                    f"diff should start with 'diff --git', got: {diff_part[:60]!r}")
 
   def test_commit_shows_parent_links(self):
     out, code = self.run_cgi(

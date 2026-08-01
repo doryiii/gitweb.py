@@ -38,7 +38,9 @@ LOGO_LABEL = "git homepage"
 STYLESHEETS = ["/static/gitweb.css"]
 LOGO = "/static/git-logo.png"
 FAVICON = "/static/git-favicon.png"
-JAVASCRIPT = "/static/gitweb.js"
+# Deliberately no JAVASCRIPT/static JS path: this port is JavaScript-free.
+# Upstream gitweb ships gitweb.js for the timezone toggle and AJAX blame; we
+# render neither, so no <script> is ever emitted (see README).
 
 USE_HIGHLIGHT = True
 HIGHLIGHT_BIN = "/usr/bin/highlight"
@@ -289,13 +291,46 @@ def run_git_bin(*args):
 # --- HTML Generation ---
 
 
+def get_content_type_html():
+  """Content-negotiate the page media type, mirroring upstream gitweb's
+  get_content_type_html() (gitweb.perl). Serve application/xhtml+xml only to
+  UAs that explicitly accept it; otherwise fall back to text/html.
+
+  This is not cosmetic. The page header carries an internal DTD subset
+  (<!DOCTYPE html [ ... ]>) defining &nbsp;/&sdot;. As text/html the HTML
+  parser ends the doctype at the first '>' inside an ENTITY, leaving the
+  subset's trailing ']>' as visible page text. As application/xhtml+xml the
+  XML parser consumes the whole subset, so the ']>' never reaches the
+  rendered body. Browsers that accept xhtml+xml get the XML type and a clean
+  render; everything else (curl, MSIE) gets text/html, matching upstream."""
+  accept = os.environ.get('HTTP_ACCEPT', '')
+  if accept:
+    # Require application/xhtml+xml as a literal Accept token (not a
+    # substring of some other type) with a non-zero quality, exactly as
+    # upstream's regex + $cgi->Accept() check do.
+    for part in accept.split(','):
+      media, *params = part.split(';')
+      if media.strip() == 'application/xhtml+xml':
+        q = 1.0
+        for p in params:
+          p = p.strip()
+          if p.startswith('q='):
+            try:
+              q = float(p[2:])
+            except ValueError:
+              q = 0.0
+        if q != 0:
+          return 'application/xhtml+xml'
+  return 'text/html'
+
+
 def git_header_html(status="200 OK"):
   title = f"{SITE_NAME}"
   if project:
     title += f" :: {project}"
 
   print(f"Status: {status}")
-  print("Content-Type: text/html; charset=utf-8")
+  print(f"Content-Type: {get_content_type_html()}; charset=utf-8")
   print()
 
   print(f"""<?xml version="1.0" encoding="utf-8"?>

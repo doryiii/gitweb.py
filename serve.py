@@ -80,6 +80,14 @@ class Handler(BaseHTTPRequestHandler):
     env["REQUEST_METHOD"] = "GET"
     env["SERVER_NAME"] = self.server.server_address[0]
     env["SERVER_PORT"] = str(self.server.server_address[1])
+    # Forward request headers as CGI HTTP_* vars (the CGI 1.1 convention:
+    # uppercase, '-' -> '_', 'HTTP_' prefix). This is what lets gitweb.py do
+    # content negotiation on Accept -- without it every request looks like it
+    # came from a non-XHTML client and the page is served as text/html,
+    # leaking the internal DTD subset's ']>' as visible text.
+    for key, val in self.headers.items():
+      cgi_key = "HTTP_" + key.upper().replace("-", "_")
+      env[cgi_key] = val
 
     try:
       result = subprocess.run([sys.executable, str(GITWEB_PY)], env=env,

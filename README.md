@@ -23,7 +23,9 @@ This is a **development server**: it spawns one `gitweb.py` process per request,
 
 ### Styling
 
-`static/gitweb.css` is vendored from git v2.54.0 (matching the parity oracle in `parity/`), so pages are styled out of the box. The logo and favicon referenced by `gitweb.py` (`static/git-logo.png`, `static/git-favicon.png`) are **not** bundled — drop them into `static/` from the same upstream directory (`git/git/static/`) if you want them.
+`static/gitweb.css` is vendored from git v2.54.0 (matching the parity oracle in `parity/`), so pages are styled out of the box. `static/git-logo.png` is bundled from the same upstream tree; the favicon (`static/git-favicon.png`) is not — drop it into `static/` from `git/git/static/` if you want it.
+
+**JavaScript-free by design.** Unlike upstream `gitweb.perl`, this port ships and emits no JavaScript: there is no `gitweb.js`, no `<script>` tags, and no inline event handlers. Pages are pure server-rendered HTML + CSS. The upstream JS-powered UI (the timezone toggle, interactive AJAX blame) is intentionally omitted rather than reimplemented — see [Unsupported Features](#unsupported-features).
 
 ### Production CGI
 
@@ -52,7 +54,7 @@ ScriptAlias /gitweb /path/to/gitweb.py
 ### Notes
 
 - All routing is GET-based; the port does not read POST bodies.
-- gitweb's JavaScript is not shipped, so JS-dependent UI (the timezone toggle, AJAX blame) is absent even though the static path is reserved.
+- The port is JavaScript-free: no JS is shipped or emitted, so JS-dependent UI (the timezone toggle, AJAX blame) is absent by design rather than merely unshipped.
 - The parity tests in `parity/` cover behavior; see `parity/README.md`.
 
 ## Supported Features

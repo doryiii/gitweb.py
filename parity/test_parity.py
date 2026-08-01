@@ -220,6 +220,15 @@ def test_snapshot_listing(fixture):
     assert e.snapshot_listing(up) == e.snapshot_listing(ours)
 
 
+def test_snapshot_filename(fixture):
+    # Upstream names a snapshot '<proj>-HEAD-<short7>' (project with the
+    # '.git' suffix stripped, plus the short SHA); we previously emitted
+    # '<proj>.git-HEAD'.  Compare the Content-Disposition filename.
+    up, ours = req(fixture, "snapshot", h="HEAD", sf="tgz")
+    assert e.snapshot_filename(up) == e.snapshot_filename(ours)
+    assert e.snapshot_filename(ours).startswith("proj-HEAD-")
+
+
 def test_snapshot_listing_tbz2(fixture):
     # tbz2 must be a real bzip2-compressed tar (we previously streamed an
     # uncompressed tar with a .tar.bz2 suffix/Content-Type).  The

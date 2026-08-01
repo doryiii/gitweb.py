@@ -52,12 +52,15 @@ python -m pytest test_gitweb.py parity/test_parity.py
 
 ## Known divergences (xfail / not yet at parity)
 
-- Snapshot *filename/prefix* -- upstream `proj-HEAD-<short>`, ours
-  `proj.git-HEAD`.  The listing test strips the prefix and compares only
-  archived content.
+None -- the harness currently asserts full parity on every endpoint it
+exercises.  Add an `xfail` test here when a new, intentional divergence
+is identified.
 
 ## Closed divergences
 
+- Snapshot *filename/prefix* -- now matches upstream's `snapshot_name`
+  (`<proj>-HEAD-<short7>`, with the `.git` suffix stripped), confirmed by
+  `test_snapshot_filename`.
 - `commitdiff_plain` -- now emits upstream's mbox-style header block
   (`From:`/`Date:`/`Subject:`/`X-Git-Tag:`/`X-Git-Url:`) plus the commit
   message and a `diff-tree -r -M -p` diff, confirmed by

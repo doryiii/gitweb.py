@@ -167,8 +167,7 @@ def snapshot_listing(raw: bytes) -> list:
 
     Only entries *under* the prefix are kept (the prefix dir itself is
     dropped), so the comparison is on archived content, not on the
-    prefix naming (which differs: upstream 'proj-HEAD-<short>' vs ours
-    'proj.git-HEAD')."""
+    prefix naming."""
     body = split_body(raw)
     names = []
     if body[:2] == b"PK":
@@ -185,6 +184,18 @@ def snapshot_listing(raw: bytes) -> list:
         if rem:
             stripped.append(rem)
     return sorted(set(stripped))
+
+
+def snapshot_filename(raw: bytes) -> str:
+    """The Content-Disposition filename of a snapshot response.
+
+    CGI.pm HTML-escapes the quoting around the value (the bytes for
+    ampersand-quot-semicolon); our port uses a literal double quote.
+    Accept either delimiter and capture the sanitized filename."""
+    q = chr(38) + "quot;"  # CGI.pm's escaped double quote
+    m = re.search(r'filename=(?:"|' + re.escape(q) + r')([\w.\-]+)',
+                  text(raw), re.I)
+    return m.group(1) if m else ""
 
 
 def project_names(raw: bytes) -> list:

@@ -228,8 +228,12 @@ class TestGitweb(unittest.TestCase):
     self.assertEqual(code, 0)
     self.assertResponseOK(out)
     self.assertIn(b"Content-Type: application/x-gzip", out)
+    # Upstream-compatible naming: project '.git' suffix stripped, then
+    # '-HEAD-<short7>' appended (was 'testrepo.git-HEAD').
     self.assertIn(
-        b"Content-Disposition: inline; filename=\"testrepo.git-HEAD.tar.gz\"", out)
+        b'Content-Disposition: inline; filename="testrepo-HEAD-', out)
+    self.assertTrue(out.rstrip().endswith(b'.tar.gz"')
+                    or b'.tar.gz"\n' in out)
 
   def test_path_info_routing(self):
     # Using PATH_INFO instead of QUERY_STRING

@@ -1931,6 +1931,47 @@ def git_object():
     print(f"Object {esc_header(hash_id)} not found or unknown type: {esc_header(out)}")
 
 
+def _sanitize_for_filename(name):
+  """Port of gitweb's sanitize_for_filename: '/' -> '-', then drop
+  anything that is not alphanumeric, '_', '.', or '-'."""
+  name = name.replace('/', '-')
+  return re.sub(r'[^A-Za-z0-9_.-]', '', name)
+
+
+def snapshot_name(proj, hash_id):
+  """Port of gitweb's snapshot_name -> (archive_name, prefix).
+
+  The project's trailing '.git' is stripped and the basename sanitized;
+  the version string is the short SHA for a hex hash, the tag name for a
+  refs/tags/ ref, or '<ref>-<short>' otherwise (e.g. 'HEAD-<short7>').
+  The name and prefix are the same string."""
+  name = re.sub(r'([^/])/*\.git$', r'\1', to_utf8(proj))
+  name = _sanitize_for_filename(os.path.basename(name))
+
+  if re.fullmatch(r'[0-9a-fA-F]+', hash_id):
+    full = (run_git("rev-parse", "--verify", "-q", hash_id) or "").strip()
+    if full.startswith(hash_id) and len(hash_id) > 7:
+      ver = (run_git("rev-parse", "--verify", "-q", "--short=7",
+                     hash_id) or "").strip()
+    else:
+      ver = hash_id
+  elif hash_id.startswith("refs/tags/"):
+    ver = hash_id[len("refs/tags/"):]
+  else:
+    ver = hash_id
+    m = re.match(r'^refs/(?:heads|remotes)/(.*)$', hash_id)
+    if m:
+      ver = m.group(1)
+    short = (run_git("rev-parse", "--verify", "-q", "--short=7",
+                     hash_id) or "").strip()
+    ver = f"{ver}-{short}" if short else ver
+
+  ver = ver.replace('/', '.')
+  ver = re.sub(r'[^A-Za-z0-9_.-]', '', ver)
+  name = f"{name}-{ver}"
+  return name, name
+
+
 def git_snapshot():
   global git_dir, hash_id
   path = os.path.join(PROJECT_ROOT, project)
@@ -1953,17 +1994,10 @@ def git_snapshot():
 
   file_name = params.get('f', [''])[0]
 
-  name = project
-  if hash_id != 'HEAD':
-    co = parse_commit(hash_id)
-    if co:
-      name += "-" + hash_id[:7]
-    else:
-      name += "-" + hash_id
-  else:
-    name += "-HEAD"
-
+  name, _prefix = snapshot_name(project, hash_id)
   if file_name:
+    # upstream snapshot ignores a pathspec; we support scoping the archive
+    # to a subpath, appending it to both the archive prefix and filename.
     name += "-" + file_name.replace('/', '-')
 
   # name flows into both the archive --prefix and the Content-Disposition

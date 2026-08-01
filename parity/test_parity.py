@@ -80,13 +80,13 @@ def test_tree_subdir_entries(fixture):
     assert e.tree_entries(up) == e.tree_entries(ours)
 
 
-def test_tree_mode_rendering_diverges(fixture):
-    # Known divergence: upstream renders symbolic modes (-rw-r--r--),
-    # we render numeric (100644).  extract.tree_entries drops mode, so
-    # the entry test above passes; this xfail documents the gap.
+def test_tree_mode_rendering(fixture):
+    # Upstream renders symbolic modes via mode_str (-rw-r--r--,
+    # drwxr-xr-x, ...); we now do the same rather than emitting numeric
+    # modes (100644).  Compare the mode column in row order.
     up, ours = req(fixture, "tree", h="HEAD")
-    assert 'class="mode">100644' in e.text(ours)
-    assert 'class="mode">-rw-r--r--' in e.text(up)
+    assert e.tree_modes(ours) == e.tree_modes(up)
+    assert '-rw-r--r--' in e.tree_modes(ours)
 
 
 # --- refs -----------------------------------------------------------------
@@ -181,6 +181,22 @@ def test_commitdiff_plain_body(fixture):
     assert e.raw_text_body(up) == e.raw_text_body(ours)
 
 
+@pytest.mark.xfail(reason="upstream commitdiff_plain emits mbox-style "
+                          "From:/Date:/Subject: headers (format-patch-like); "
+                          "we emit a raw diff-tree diff with no headers")
+def test_commitdiff_plain_mbox_headers(fixture):
+    # Pinpoints *what* about commitdiff_plain still diverges, so the gap
+    # is characterized rather than just "bodies differ": the desired
+    # parity is that ours lead with the same mbox-style header block
+    # (From:/Date:/Subject:) upstream emits, instead of a bare diff.
+    up, ours = req(fixture, "commitdiff_plain", h="HEAD")
+    up_body = e.raw_text_body(up)
+    ours_body = e.raw_text_body(ours)
+    assert up_body.startswith("From: ")      # upstream has the header block
+    assert ours_body.startswith("From: ")    # we currently do not (xfail)
+    assert "\nSubject: " in ours_body
+
+
 def test_patch_body(fixture):
     up, ours = req(fixture, "patch", h="HEAD")
     assert e.raw_text_body(up) == e.raw_text_body(ours)
@@ -193,6 +209,15 @@ def test_patches_body(fixture):
 
 def test_snapshot_listing(fixture):
     up, ours = req(fixture, "snapshot", h="HEAD", sf="tgz")
+    assert e.snapshot_listing(up) == e.snapshot_listing(ours)
+
+
+def test_snapshot_listing_tbz2(fixture):
+    # tbz2 must be a real bzip2-compressed tar (we previously streamed an
+    # uncompressed tar with a .tar.bz2 suffix/Content-Type).  The
+    # extractor opens with tarfile "r:*", which auto-detects bzip2, so a
+    # mislabeled plain tar would raise here.
+    up, ours = req(fixture, "snapshot", h="HEAD", sf="tbz2")
     assert e.snapshot_listing(up) == e.snapshot_listing(ours)
 
 

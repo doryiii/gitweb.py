@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import re
+import bz2
 import subprocess
 import urllib.parse
 import html
@@ -630,6 +631,37 @@ def parse_tree(tree_id):
       })
   return entries
 
+
+# stat.h type-of-file masks, used to render symbolic tree-entry modes.
+_S_IFMT = 0o170000
+_S_IFDIR = 0o040000
+_S_IFLNK = 0o120000
+_S_IFREG = 0o100000
+_S_IFGITLINK = 0o160000
+_S_IXUSR = 0o100
+
+
+def mode_str(mode):
+  """Render a git tree-entry mode (octal string) as a symbolic mode,
+  matching gitweb's mode_str: '-rw-r--r--' for a regular file,
+  'drwxr-xr-x' for a directory, 'lrwxrwxrwx' for a symlink, and
+  'm---------' for a submodule (gitlink).  Git tracks only the
+  executable bit, so regular files collapse to the two rwx variants."""
+  try:
+    m = int(mode, 8)
+  except (ValueError, TypeError):
+    return '----------'
+  fmt = m & _S_IFMT
+  if fmt == _S_IFGITLINK:
+    return 'm---------'
+  if fmt == _S_IFDIR:
+    return 'drwxr-xr-x'
+  if fmt == _S_IFLNK:
+    return 'lrwxrwxrwx'
+  if fmt == _S_IFREG:
+    return '-rwxr-xr-x' if m & _S_IXUSR else '-rw-r--r--'
+  return '----------'
+
 # --- Actions ---
 
 
@@ -1126,7 +1158,7 @@ def git_tree():
                       hash_base=hash_base, file_name=f_path)
 
       print(
-          f'<tr><td class="mode">{esc_html(entry["mode"])}</td><td class="type">{esc_html(entry["type"])}</td>')
+          f'<tr><td class="mode">{esc_html(mode_str(entry["mode"]))}</td><td class="type">{esc_html(entry["type"])}</td>')
       print(
           f'<td><a href="{esc_url(url)}" class="list">{esc_html(f_name)}</a></td>')
       print(
@@ -1138,7 +1170,7 @@ def git_tree():
                       hash=hash_base, file_name=f_path)
 
       print(
-          f'<tr><td class="mode">{esc_html(entry["mode"])}</td><td class="type">{esc_html(entry["type"])}</td>')
+          f'<tr><td class="mode">{esc_html(mode_str(entry["mode"]))}</td><td class="type">{esc_html(entry["type"])}</td>')
       print(
           f'<td><a href="{esc_url(url)}" class="list">{esc_html(f_name)}</a></td>')
       print(
@@ -1875,7 +1907,20 @@ def git_snapshot():
   sys.stdout.flush()
 
   try:
-    subprocess.run(cmd, stdout=sys.stdout.buffer, stderr=subprocess.DEVNULL)
+    if fmt.get('compressor'):
+      # 'tar' formats (tbz2) come uncompressed out of `git archive`, which
+      # has no native bzip2 writer -- unlike 'tgz'/'zip', which it
+      # compresses itself.  Run the tar through the configured compressor
+      # (bzip2) before streaming so the body actually matches the suffix
+      # and Content-Type we advertised.
+      archive = subprocess.run(cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL).stdout
+      if fmt['compressor'] == ['bzip2']:
+        sys.stdout.buffer.write(bz2.compress(archive))
+      else:
+        sys.stdout.buffer.write(archive)
+    else:
+      subprocess.run(cmd, stdout=sys.stdout.buffer, stderr=subprocess.DEVNULL)
   except Exception:
     pass
 

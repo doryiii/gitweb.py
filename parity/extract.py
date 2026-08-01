@@ -89,6 +89,16 @@ def refs_names(raw: bytes) -> list:
     return re.findall(r'class="list name"[^>]*>([^<]*)</a>', text(raw))
 
 
+def tree_modes(raw: bytes) -> list:
+    """Symbolic mode strings from the tree table's mode column, in row
+    order.  Upstream renders symbolic modes via mode_str (e.g.
+    '-rw-r--r--'); this lets the parity test confirm we match rather
+    than diverging to numeric ('100644')."""
+    m = re.search(r'<table class="tree">(.*?)</table>', text(raw), re.S)
+    body = m.group(1) if m else ""
+    return re.findall(r'class="mode">([^<]*)</td>', body)
+
+
 def search_commit_shas(raw: bytes) -> list:
     """Commit SHAs matched by a commit/author/committer/pickaxe search.
 

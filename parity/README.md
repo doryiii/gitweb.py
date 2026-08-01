@@ -52,14 +52,21 @@ python -m pytest test_gitweb.py parity/test_parity.py
 
 ## Known divergences (xfail / not yet at parity)
 
-- `commitdiff_plain` -- upstream emits mbox-style `From:`/`Subject:` headers
-  (format-patch-like); we emit a raw `diff-tree` diff.
-- Tree *mode* rendering -- upstream symbolic (`-rw-r--r--`), ours numeric
-  (`100644`).  `tree_entries` drops mode so the entry test passes; the gap is
-  documented by `test_tree_mode_rendering_diverges`.
+- `commitdiff_plain` -- upstream emits mbox-style `From:`/`Date:`/`Subject:`
+  headers (format-patch-like); we emit a raw `diff-tree` diff.  Two granular
+  xfails cover it: `test_commitdiff_plain_body` (whole body) and
+  `test_commitdiff_plain_mbox_headers` (the missing header block).
 - Snapshot *filename/prefix* -- upstream `proj-HEAD-<short>`, ours
   `proj.git-HEAD`.  The listing test strips the prefix and compares only
   archived content.
+
+## Closed divergences
+
+- Tree *mode* rendering -- now symbolic (`-rw-r--r--`, `drwxr-xr-x`, ...) via a
+  port of upstream `mode_str`, confirmed by `test_tree_mode_rendering`.
+- `tbz2` snapshot -- was served as an uncompressed tar mislabeled
+  `.tar.bz2`; `git archive --format=tar` is now piped through bzip2.
+  Covered by `test_snapshot_listing_tbz2`.
 
 ## Regenerating the upstream oracle
 
